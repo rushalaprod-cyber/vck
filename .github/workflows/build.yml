@@ -1,0 +1,84 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --target vck_VST3 vck_Standalone vckTest --parallel
+
+      - name: Tests
+        run: build\vckTest_artefacts\Release\vckTest.exe
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DBuildDir=$env:GITHUB_WORKSPACE\build\vck_artefacts\Release" packaging\windows\vck.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vck-windows
+          path: packaging/windows/output/*.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --target vck_VST3 vck_AU vck_Standalone vckTest --parallel 4
+
+      - name: Tests
+        run: build/vckTest_artefacts/Release/vckTest
+
+      - name: Package
+        run: |
+          chmod +x packaging/macos/package.sh
+          packaging/macos/package.sh build/vck_artefacts/Release dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vck-macos
+          path: |
+            dist/*.pkg
+            dist/*.zip
+
+      - name: Validation Audio Unit (auval)
+        run: |
+          sudo installer -pkg dist/vck-1.0.0-macos.pkg -target /
+          killall -9 AudioComponentRegistrar || true
+          auval -v aumf Vckv Vckd
+
+  # Un tag v* publie automatiquement les deux installeurs dans une release GitHub
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" artefacts/vck-windows/*.exe artefacts/vck-macos/*.pkg artefacts/vck-macos/*.zip \
+            --repo "${GITHUB_REPOSITORY}" --clobber \
+          || gh release create "${GITHUB_REF_NAME}" artefacts/vck-windows/*.exe artefacts/vck-macos/*.pkg artefacts/vck-macos/*.zip \
+            --repo "${GITHUB_REPOSITORY}" --title "vck ${GITHUB_REF_NAME}" --notes "Installeurs Windows (.exe) et macOS (.pkg, Apple Silicon + Intel)."

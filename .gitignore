@@ -1,0 +1,9 @@
+build/
+external/
+dist/*.exe
+dist/*.pkg
+dist/*.zip
+test-output/
+packaging/windows/output/
+*.user
+.vs/

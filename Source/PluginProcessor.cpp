@@ -89,6 +89,7 @@ AudioProcessorValueTreeState::ParameterLayout VckProcessor::createLayout()
     add (new APF (id ("hold"), "Hold", NormalisableRange<float> (0.f, 500.f, 1.f), 90.f, ms));
     add (new APC (id ("voiceRange"), "Voice Range", StringArray { "GRAVE", "MEDIUM", "AIGUE", "LARGE" }, 1));
     add (new APB (id ("drone"), "Drone", false));
+    add (new APF (id ("harmWidth"), "Harmony Width", unit, 0.6f, pct));
 
     // ---- clip MIDI
     add (new APB (id ("clipOn"), "Clip Play", true));
@@ -97,6 +98,7 @@ AudioProcessorValueTreeState::ParameterLayout VckProcessor::createLayout()
     add (new API (id ("transpose"), "Transpose", -24, 24, 0));
     add (new APC (id ("rate"), "Rate", StringArray { "1/2", "1x", "2x" }, 1));
     add (new APB (id ("loop"), "Loop", true));
+    add (new APF (id ("clipGate"), "Clip Gate", NormalisableRange<float> (0.1f, 2.f, 0.01f), 1.f, pct));
 
     // ---- doubleur (facon Waves Doubler)
     add (new APC (id ("dblVoices"), "Doubler", StringArray { "OFF", "2 VOIX", "4 VOIX" }, 0));
@@ -108,6 +110,7 @@ AudioProcessorValueTreeState::ParameterLayout VckProcessor::createLayout()
     add (new APF (id ("dblDrift"), "Dbl Drift", unit, 0.5f, pct));
     add (new APF (id ("dblRate"), "Dbl Rate", skewed (0.05f, 5.f, 0.8f), 0.8f, lfo));
     add (new APF (id ("dblHpf"), "Dbl HPF", skewed (20.f, 1000.f, 150.f), 120.f, offHz (20.f, true)));
+    add (new APB (id ("dblLink"), "Dbl Link", false));
     add (new APF (id ("dblLpf"), "Dbl LPF", skewed (2000.f, 20000.f, 8000.f), 16000.f, offHz (20000.f, false)));
     {
         const float dly[4] = { 11.f, 17.f, 23.f, 7.f }, det[4] = { 9.f, -11.f, 5.f, -6.f }, pan[4] = { -1.f, 1.f, -0.55f, 0.55f }, gn[4] = { 0.f, 0.f, -2.f, -2.f };
@@ -170,7 +173,7 @@ VckProcessor::VckProcessor()
     P.key = p ("key"); P.scale = p ("scale"); P.harmony = p ("harmony"); P.retune = p ("retune"); P.humanize = p ("humanize");
     P.autoTrans = p ("autoTrans"); P.harmLevel = p ("harmLevel"); P.tracking = p ("tracking"); P.hold = p ("hold");
     P.voiceRange = p ("voiceRange"); P.drone = p ("drone");
-    P.clipOn = p ("clipOn"); P.sync = p ("sync"); P.bpm = p ("bpm"); P.transpose = p ("transpose"); P.rate = p ("rate"); P.loop = p ("loop");
+    P.clipOn = p ("clipOn"); P.sync = p ("sync"); P.bpm = p ("bpm"); P.transpose = p ("transpose"); P.rate = p ("rate"); P.loop = p ("loop"); P.clipGate = p ("clipGate"); P.harmWidth = p ("harmWidth"); P.dblLink = p ("dblLink");
     P.dblVoices = p ("dblVoices"); P.dblMix = p ("dblMix"); P.dblDirect = p ("dblDirect"); P.dblWidth = p ("dblWidth");
     P.dblDetune = p ("dblDetune"); P.dblDelay = p ("dblDelay"); P.dblDrift = p ("dblDrift"); P.dblRate = p ("dblRate");
     P.dblHpf = p ("dblHpf"); P.dblLpf = p ("dblLpf");
@@ -194,6 +197,7 @@ VckProcessor::VckProcessor()
     for (auto& a : uiInNotes) a = 0u;
     for (auto& a : uiPitchIn) a = -1.f;
     for (auto& a : uiPitchOut) a = -1.f;
+    startTimerHz (30);
 }
 
 bool VckProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -215,6 +219,8 @@ void VckProcessor::prepareToPlay (double sampleRate, int)
     const float f = (float) fs;
     vocoder.prepare (fs);
     synth.prepare (fs);
+    previewSynth.prepare (fs);
+    previewLeft.fill (0);
     tracker.prepare (fs);
     doubler.prepare (fs);
     ensemble.prepare (fs);
@@ -291,7 +297,12 @@ void VckProcessor::updateParams()
     sp.velSens = P.velSens->load();
     sp.bend = bendSemis;
     sp.harmLevel = P.harmLevel->load();
+    sp.harmWidth = P.harmWidth->load();
     synth.setParams (sp);
+    {
+        auto pp = sp; pp.mode = 0; pp.glideMs = 0.f; pp.vibrato = 0.f; pp.attackMs = 3.f; pp.releaseMs = 80.f; pp.bend = 0.f;
+        previewSynth.setParams (pp);
+    }
     synth.autoGlideMs = P.retune->load();
 
     static constexpr float rangeLo[4] = { 50.f, 75.f, 140.f, 50.f }, rangeHi[4] = { 450.f, 900.f, 1200.f, 1200.f };
@@ -453,7 +464,7 @@ void VckProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
             const bool loop = P.loop->load() > 0.5f;
             if (playing)
             {
-                player.process (clip, beat, bps, n, (int) P.transpose->load(), loop, clipMidi);
+                player.process (clip, beat, bps, n, (int) P.transpose->load(), loop, clipMidi, P.clipGate->load());
                 playBeat = (float) (loop ? std::fmod (std::max (0.0, beat), clip.lengthBeats) : beat);
                 clipActive = loop || beat < clip.lengthBeats;
             }
@@ -470,7 +481,28 @@ void VckProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     if (source == 0) clipMidi.addEvents (midi, 0, n, 0);
     midi.clear();
     // tout le MIDI est retarde de l'anticipation (aligne sur la voix retardee)
-    for (const auto meta : clipMidi) pending.push_back ({ sampleClock + meta.samplePosition + lookD, meta.getMessage() });
+    for (const auto meta : clipMidi)
+    {
+        Pending ev { sampleClock + meta.samplePosition + lookD, meta.getMessage() };
+        pending.insert (std::upper_bound (pending.begin(), pending.end(), ev, [] (const Pending& a, const Pending& b) { return a.due < b.due; }), ev);
+    }
+    // ecoute des notes ecrites dans le piano roll (synthe a part, directement en sortie)
+    {
+        int s1, n1, s2, n2;
+        previewFifo.prepareToRead (previewFifo.getNumReady(), s1, n1, s2, n2);
+        auto take = [&] (int start, int count)
+        {
+            for (int k = 0; k < count; ++k)
+            {
+                const auto [note, vel] = previewBuf[(size_t) (start + k)];
+                if (previewLeft[(size_t) note] > 0) previewSynth.noteOff (note);
+                previewSynth.noteOn (note, vel);
+                previewLeft[(size_t) note] = (int) (0.35 * fs);
+            }
+        };
+        take (s1, n1); take (s2, n2);
+        previewFifo.finishedRead (n1 + n2);
+    }
 
     // ---- MIDI sans notes : vck suit la voix (jamais de silence)
     const double now = (double) sampleClock / fs;
@@ -544,6 +576,9 @@ void VckProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
             clvl = std::min (1.f, scLevel / (scPeak * 0.5f + 1e-6f));
         }
         else { synth.render (cL, cR); clvl = synth.level(); }
+        float pvL = 0.f, pvR = 0.f;
+        if (ctrlCount == 1) previewSynth.control (vck::Vocoder::ctrl);
+        previewSynth.render (pvL, pvR);
 
         float vL, vR;
         vocoder.process (voice, cL, cR, clvl, vL, vR);
@@ -577,7 +612,7 @@ void VckProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
             wL = mid + side; wR = mid - side;
         }
         const float g = outS.next();
-        wL *= g; wR *= g;
+        wL = wL * g + pvL * 0.5f; wR = wR * g + pvR * 0.5f;
         limiter.process (wL, wR);
 
         const float byp = bypassS.next();
@@ -588,6 +623,8 @@ void VckProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     }
     // evenements restants (dus dans ce bloc mais pas encore lus) puis menage de la file
     pending.erase (pending.begin(), pending.begin() + (std::ptrdiff_t) pIdx);
+    for (int k = 0; k < 128; ++k)
+        if (previewLeft[(size_t) k] > 0 && (previewLeft[(size_t) k] -= n) <= 0) { previewLeft[(size_t) k] = 0; previewSynth.noteOff (k); }
     sampleClock += n;
 
     // ---- interface
@@ -661,13 +698,94 @@ bool VckProcessor::loadMidi (const File& f, String& error)
 {
     vck::Clip c;
     if (! vck::Clip::load (f, c, error)) return false;
+    pushClipUndo();
     { const SpinLock::ScopedLockType l (clipLock); clip = std::move (c); }
     ++clipVersion;
     return true;
 }
 
+void VckProcessor::setClip (const vck::Clip& c)
+{
+    { const SpinLock::ScopedLockType l (clipLock); clip = c; }
+    ++clipVersion;
+}
+
+void VckProcessor::pushClipUndo()
+{
+    clipUndoStack.push_back (getClipCopy());
+    if (clipUndoStack.size() > 200) clipUndoStack.erase (clipUndoStack.begin());
+    clipRedoStack.clear();
+}
+
+bool VckProcessor::clipUndo()
+{
+    if (clipUndoStack.empty()) return false;
+    clipRedoStack.push_back (getClipCopy());
+    setClip (clipUndoStack.back());
+    clipUndoStack.pop_back();
+    return true;
+}
+
+bool VckProcessor::clipRedo()
+{
+    if (clipRedoStack.empty()) return false;
+    clipUndoStack.push_back (getClipCopy());
+    setClip (clipRedoStack.back());
+    clipRedoStack.pop_back();
+    return true;
+}
+
+void VckProcessor::previewNote (int note, float vel)
+{
+    int s1, n1, s2, n2;
+    previewFifo.prepareToWrite (1, s1, n1, s2, n2);
+    if (n1 > 0) previewBuf[(size_t) s1] = { jlimit (0, 127, note), vel };
+    else if (n2 > 0) previewBuf[(size_t) s2] = { jlimit (0, 127, note), vel };
+    previewFifo.finishedWrite (n1 + n2);
+}
+
+// LINK du doubleur : on tourne un bouton d'une voix, les autres suivent en proportion
+// (retard, desaccord et panoramique gardent leur rapport ; le gain suit en dB)
+void VckProcessor::timerCallback()
+{
+    static const char* kinds[4] = { "dblDelay", "dblDetune", "dblPan", "dblGain" };
+    std::array<std::array<float, 4>, 4> cur {};
+    for (int t = 0; t < 4; ++t)
+        for (int v = 0; v < 4; ++v)
+            cur[(size_t) t][(size_t) v] = apvts.getRawParameterValue (String (kinds[t]) + String (v + 1))->load();
+    if (linkPrimed && P.dblLink->load() > 0.5f)
+    {
+        const int nv = (int) P.dblVoices->load() == 2 ? 4 : 2;
+        for (int t = 0; t < 4; ++t)
+        {
+            int changed = -1, count = 0;
+            for (int v = 0; v < nv; ++v)
+                if (std::abs (cur[(size_t) t][(size_t) v] - linkLast[(size_t) t][(size_t) v]) > 1e-4f) { changed = v; ++count; }
+            if (count != 1) continue;
+            const float before = linkLast[(size_t) t][(size_t) changed], after = cur[(size_t) t][(size_t) changed];
+            const float delta = after - before;
+            const bool ratioOk = t != 3 && std::abs (before) > (t == 0 ? 0.5f : 0.05f);
+            for (int v = 0; v < nv; ++v)
+            {
+                if (v == changed) continue;
+                const float o = cur[(size_t) t][(size_t) v];
+                float nvv = t == 3 ? o + delta
+                          : ratioOk ? o * (after / before)
+                                    : o + delta * (o < 0.f ? -1.f : 1.f);
+                static constexpr float lo[4] = { 1.f, -50.f, -1.f, -24.f }, hi[4] = { 100.f, 50.f, 1.f, 6.f };
+                nvv = jlimit (lo[t], hi[t], nvv);
+                presets.setTreeValue (String (kinds[t]) + String (v + 1), nvv, &undo);
+                cur[(size_t) t][(size_t) v] = apvts.getRawParameterValue (String (kinds[t]) + String (v + 1))->load();
+            }
+        }
+    }
+    linkLast = cur;
+    linkPrimed = true;
+}
+
 void VckProcessor::clearMidi()
 {
+    pushClipUndo();
     { const SpinLock::ScopedLockType l (clipLock); clip = vck::Clip(); }
     ++clipVersion;
 }

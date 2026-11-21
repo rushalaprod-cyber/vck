@@ -512,6 +512,79 @@ int main()
         CHECK (ripple < 1.5, "doubleur : niveau instable (peigne)");
     }
 
+    // ------------------------------------------------------------------ clip : gate, longueur, export, undo
+    std::printf ("== Clip : gate / longueur / export / undo\n");
+    {
+        vck::Clip c; c.name = "suite"; c.lengthBeats = 8.0;
+        for (int k = 0; k < 4; ++k) c.notes.push_back ({ (double) k * 2.0, 1.0, 60 + k * 2, 0.9f, false });
+        // GATE 50 % : chaque note dure une croche au lieu d'une noire
+        vck::ClipPlayer pl; pl.reset();
+        const double bps = 120.0 / 60.0 / fs;
+        int onAt = -1, offAt = -1; long long smp = 0; double beat = 0;
+        for (int b = 0; b < 200 && offAt < 0; ++b)
+        {
+            MidiBuffer mb;
+            pl.process (c, beat, bps, 480, 0, true, mb, 0.5);
+            for (const auto m : mb)
+            {
+                if (m.getMessage().isNoteOn() && onAt < 0) onAt = (int) (smp + m.samplePosition);
+                if (m.getMessage().isNoteOff() && onAt >= 0 && offAt < 0) offAt = (int) (smp + m.samplePosition);
+            }
+            beat += 480 * bps; smp += 480;
+        }
+        const double lenBeats = (offAt - onAt) * bps;
+        std::printf ("  GATE 50 %% : note jouee %.3f temps (ecrite 1.000)\n", lenBeats);
+        CHECK (std::abs (lenBeats - 0.5) < 0.01, "gate");
+
+        // boucle de 8 temps : la 1re note revient au temps 8
+        pl.reset(); beat = 0; smp = 0;
+        std::vector<long long> ons;
+        for (int b = 0; b < 1000; ++b)
+        {
+            MidiBuffer mb;
+            pl.process (c, beat, bps, 480, 0, true, mb);
+            for (const auto m : mb) if (m.getMessage().isNoteOn() && m.getMessage().getNoteNumber() == 60) ons.push_back (smp + m.samplePosition);
+            beat += 480 * bps; smp += 480;
+        }
+        CHECK (ons.size() >= 2 && std::llabs ((ons[1] - ons[0]) - (long long) std::llround (8.0 / bps)) <= 1, "longueur de boucle");
+
+        // export .mid puis relecture
+        auto mid = outDir.getChildFile ("export.mid");
+        CHECK (c.save (mid, 97.0), "export .mid");
+        vck::Clip back; String err;
+        CHECK (vck::Clip::load (mid, back, err) && back.notes.size() == 4 && std::abs (back.notes[2].start - 4.0) < 0.01, "relecture du .mid exporte");
+
+        // undo / redo du clip dans le plugin
+        VckProcessor p;
+        p.pushClipUndo(); p.setClip (c);
+        auto c2 = c; c2.notes.pop_back(); p.pushClipUndo(); p.setClip (c2);
+        CHECK (p.getClipCopy().notes.size() == 3, "edition");
+        CHECK (p.clipUndo() && p.getClipCopy().notes.size() == 4, "undo du clip");
+        CHECK (p.clipRedo() && p.getClipCopy().notes.size() == 3, "redo du clip");
+        std::printf ("  boucle, export / relecture .mid, undo / redo du clip : OK\n");
+    }
+
+    // ------------------------------------------------------------------ harmonies en stereo
+    std::printf ("== Largeur des harmonies\n");
+    {
+        auto side = [&] (float w)
+        {
+            VckProcessor p; p.setPlayConfigDetails (2, 2, fs, 480); p.prepareToPlay (fs, 480);
+            setP (p, "source", 1); setP (p, "harmony", 3); setP (p, "harmWidth", w); setP (p, "reverb", 0);
+            auto out = render (p, fs, 3.0, false);
+            double s2 = 0, m2 = 0;
+            for (int i = (int) fs; i < out.getNumSamples(); ++i)
+            {
+                const double l = out.getSample (0, i), r = out.getSample (1, i);
+                s2 += (l - r) * (l - r); m2 += (l + r) * (l + r);
+            }
+            return 10.0 * std::log10 ((s2 + 1e-12) / (m2 + 1e-12));
+        };
+        const double w0 = side (0.f), w1 = side (1.f);
+        std::printf ("  rapport cote / centre : largeur 0 %% = %.1f dB, 100 %% = %.1f dB\n", w0, w1);
+        CHECK (w1 > w0 + 10.0, "largeur des harmonies");
+    }
+
     // ------------------------------------------------------------------ interface
     std::printf ("== Interface\n");
     {
@@ -547,7 +620,26 @@ int main()
             FileOutputStream os (png);
             PNGImageFormat().writeImageToStream (img, os);
         }
+        if (auto* ve = dynamic_cast<VckEditor*> (ed.get())) { ve->showBrowser (false); ve->openClipEditor(); }
+        for (int i = 0; i < 10; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
+        {
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            auto png = File::getCurrentWorkingDirectory().getChildFile ("dist").getChildFile ("apercu-piano-roll.png");
+            png.deleteFile();
+            FileOutputStream os (png);
+            PNGImageFormat().writeImageToStream (img, os);
+        }
         std::printf ("  captures : dist/apercu-*.png\n");
+
+        // LINK du doubleur (minuterie du thread message)
+        setP (p, "dblVoices", 2); setP (p, "dblLink", 1);
+        for (int i = 0; i < 6; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
+        const float d2 = p.apvts.getRawParameterValue ("dblDetune2")->load(), d3 = p.apvts.getRawParameterValue ("dblDetune3")->load();
+        setP (p, "dblDetune1", 18.f);   // 9 -> 18 cents : les autres voix doublent aussi, en gardant leur signe
+        for (int i = 0; i < 6; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
+        const float n2 = p.apvts.getRawParameterValue ("dblDetune2")->load(), n3 = p.apvts.getRawParameterValue ("dblDetune3")->load();
+        std::printf ("  LINK : voix 2 %.1f -> %.1f ct, voix 3 %.1f -> %.1f ct\n", d2, n2, d3, n3);
+        CHECK (std::abs (n2 - d2 * 2.f) < 0.3f && std::abs (n3 - d3 * 2.f) < 0.3f, "LINK du doubleur");
         ed.reset();
     }
 

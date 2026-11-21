@@ -6,7 +6,7 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
 endif()
 
-project(vck VERSION 1.1.0)
+project(vck VERSION 1.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,6 +50,7 @@ set(VCK_SOURCES
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Widgets.cpp
+    Source/ClipEditor.cpp
     Source/Presets.cpp)
 
 target_sources(vck PRIVATE ${VCK_SOURCES})

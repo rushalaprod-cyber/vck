@@ -4,7 +4,7 @@
 #include "MidiClip.h"
 #include "Presets.h"
 
-class VckProcessor : public juce::AudioProcessor
+class VckProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     VckProcessor();
@@ -49,6 +49,15 @@ public:
     // ---- clip MIDI
     bool loadMidi (const juce::File& f, juce::String& error);
     void clearMidi();
+    // edition du clip (piano roll) : thread message uniquement
+    void setClip (const vck::Clip& c);
+    void pushClipUndo();
+    bool clipUndo();
+    bool clipRedo();
+    bool canClipUndo() const { return ! clipUndoStack.empty(); }
+    bool canClipRedo() const { return ! clipRedoStack.empty(); }
+    void previewNote (int note, float vel);    // ecoute d'une note pendant l'ecriture
+    double beatSeconds() const { return 60.0 / std::max (1.f, uiBpm.load()); }
     vck::Clip getClipCopy() const { const juce::SpinLock::ScopedLockType l (clipLock); return clip; }
     std::atomic<int> clipVersion { 0 };
     std::atomic<float> playBeat { -1.f };
@@ -68,6 +77,14 @@ public:
     std::atomic<int> uiPitchWrite { 0 };
 
 private:
+    void timerCallback() override;    // LINK du doubleur
+    std::array<std::array<float, 4>, 4> linkLast {};
+    bool linkPrimed = false;
+    std::vector<vck::Clip> clipUndoStack, clipRedoStack;
+    juce::AbstractFifo previewFifo { 64 };
+    std::array<std::pair<int, float>, 64> previewBuf {};
+    vck::CarrierSynth previewSynth;
+    std::array<int, 128> previewLeft {};
     void updateParams();
     void handleMidi (const juce::MidiMessage& m);
     void applyLatencyMode (bool noLatency);
@@ -120,7 +137,7 @@ private:
                            *source, *wave, *unison, *detune, *octave, *glide, *mode, *vibrato, *vibRate, *noise, *envA, *envR,
                            *sub, *velSens, *bendRange,
                            *key, *scale, *harmony, *retune, *humanize, *autoTrans, *harmLevel, *tracking, *hold, *voiceRange, *drone,
-                           *clipOn, *sync, *bpm, *transpose, *rate, *loop,
+                           *clipOn, *sync, *bpm, *transpose, *rate, *loop, *clipGate, *harmWidth, *dblLink,
                            *dblVoices, *dblMix, *dblDirect, *dblWidth, *dblDetune, *dblDelay, *dblDrift, *dblRate, *dblHpf, *dblLpf,
                            *dblVDelay[4], *dblVDetune[4], *dblVPan[4], *dblVGain[4],
                            *drive, *lowCut, *highCut, *comp,

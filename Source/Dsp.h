@@ -234,7 +234,7 @@ struct SynthParams
     float vibrato = 0.f, vibRate = 5.6f;
     float attackMs = 5.f, releaseMs = 120.f;
     float noise = 0.f, sub = 0.f, velSens = 0.7f, bend = 0.f;
-    float width = 0.6f, harmLevel = 0.8f;
+    float width = 0.6f, harmLevel = 0.8f, harmWidth = 0.6f;
 };
 
 class CarrierSynth
@@ -319,6 +319,8 @@ public:
                 }
                 v.gate = true;
                 v.vel = i == 0 ? 1.f : prm.harmLevel;
+                static constexpr float harmPan[5] = { 0.f, -1.f, 1.f, -0.55f, 0.55f };
+                v.pan = harmPan[i] * prm.harmWidth;
                 v.note = std::clamp ((int) std::round (notes[i]), 0, 127);
                 v.targetNote = notes[i];
             }
@@ -366,6 +368,10 @@ public:
             }
             v.subDt = std::min (0.45f, std::exp (v.logF + vibSemi * lnSemi) * 0.5f / fs);
             v.u = u;
+            {
+                const float a = (std::clamp (v.pan, -1.f, 1.f) + 1.f) * 0.25f * pi;
+                v.gl = std::cos (a) * 1.41421356f; v.gr = std::sin (a) * 1.41421356f;
+            }
             lvl += v.envTarget * v.vel;
             if (! v.gate && v.envTarget < 1.0e-4f && v.env < 1.0e-4f) { v.note = -1; v.env = v.envTarget = 0.f; }
         }
@@ -384,8 +390,8 @@ public:
             if (amp <= 0.f) continue;
             if (prm.wave == 5)
             {
-                L += noise.next() * amp * 0.35f;
-                R += noise.next() * amp * 0.35f;
+                L += noise.next() * amp * 0.35f * v.gl;
+                R += noise.next() * amp * 0.35f * v.gr;
                 continue;
             }
             const float norm = 0.32f / std::sqrt ((float) v.u);
@@ -403,15 +409,15 @@ public:
                 else s = 2.f * ph - 1.f - blep (ph, dt);
                 ph += dt; if (ph >= 1.f) ph -= 1.f;
                 const float p = v.u == 1 ? 0.f : spread (k, v.u) * prm.width;
-                L += s * amp * norm * (1.f - p);
-                R += s * amp * norm * (1.f + p);
+                L += s * amp * norm * (1.f - p) * v.gl;
+                R += s * amp * norm * (1.f + p) * v.gr;
             }
             if (prm.sub > 0.f)
             {
                 float s = (v.subPh < 0.5f ? 1.f : -1.f) + blep (v.subPh, v.subDt) - blep (frac (v.subPh + 0.5f), v.subDt);
                 v.subPh += v.subDt; if (v.subPh >= 1.f) v.subPh -= 1.f;
                 s *= amp * 0.3f * prm.sub;
-                L += s; R += s;
+                L += s * v.gl; R += s * v.gr;
             }
         }
         if (prm.noise > 0.f)
@@ -434,7 +440,7 @@ private:
     struct Voice
     {
         int note = -1; bool gate = false; float vel = 0.f, env = 0.f, envTarget = 0.f, envStep = 0.f;
-        float logF = std::log (440.f), targetNote = 69.f, vibAge = 0.f, subPh = 0.f, subDt = 0.f;
+        float logF = std::log (440.f), targetNote = 69.f, vibAge = 0.f, subPh = 0.f, subDt = 0.f, pan = 0.f, gl = 1.f, gr = 1.f;
         uint32_t order = 0; int u = 1;
         std::array<float, maxUnison> ph {}, dt {}, rnd {};
         bool active() const { return note >= 0; }
@@ -446,7 +452,7 @@ private:
         void start (int n, float v, bool slide, uint32_t ord, bool legato, float octave)
         {
             if (! slide) logF = std::log (mtof ((float) n + octave));
-            note = n; targetNote = (float) n; vel = v; gate = true; order = ord;
+            note = n; targetNote = (float) n; vel = v; gate = true; order = ord; pan = 0.f;
             if (! legato) vibAge = 0.f;
         }
     };

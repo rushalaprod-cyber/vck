@@ -9,8 +9,8 @@ Même univers visuel que **ravenn**.
 
 Télécharge l'installeur dans la page **Releases** du dépôt :
 
-- **Windows** : `vck-1.1.0-windows-setup.exe` → installe le VST3 (`C:\Program Files\Common Files\VST3`) et l'application.
-- **macOS** : `vck-1.1.0-macos.pkg` → installe VST3, AU et l'application.
+- **Windows** : `vck-1.2.0-windows-setup.exe` → installe le VST3 (`C:\Program Files\Common Files\VST3`) et l'application.
+- **macOS** : `vck-1.2.0-macos.pkg` → installe VST3, AU et l'application.
   Le plugin n'est pas notarisé : si macOS bloque l'installeur, clic droit → **Ouvrir**.
 
 ## En 30 secondes
@@ -53,12 +53,15 @@ Un preset ne change jamais ta **gamme** (KEY / SCALE), ton clip MIDI, ton niveau
 - **EFFECTS** — DRIVE (anti-repliement), LOW / HIGH CUT, COMP, ENSEMBLE, PHASER, DELAY (BPM, feedback, tone, ping-pong), REVERB (taille, pré-délai, amortissement, largeur).
 - **Sortie** — niveau automatique, limiteur transparent (avec anticipation en HQ), largeur stéréo.
 - **HQ / NO LATENCY** — en HQ (17,5 ms compensés par le DAW), la hauteur est détectée avant que la voix n'arrive : le robot attaque juste. NO LATENCY = zéro latence pour chanter en direct.
-- **Clip MIDI** — import `.mid` (glisser-déposer), synchronisé au tempo du DAW à l'échantillon près, ½ / 1x / 2x, transposition, boucle, sauvé avec le projet.
+- **Clip MIDI + piano roll** (repris d'oraclee) — importe un `.mid` ou écris tes notes : crayon / sélection, déplacer, allonger, dupliquer, copier-coller, vélocité, quantize, grille (1/1 à 1/32, triolets), longueur de la boucle en mesures, undo / redo, export `.mid`.
+  Tout est en mesures : le clip suit le BPM du DAW à l'échantillon près (ou le BPM réglé en FREE), ½ / 1x / 2x, transposition, **GATE** (longueur jouée des notes), sauvé avec le projet.
+- **LINK** du doubleur : tourne un réglage d'une voix, les autres suivent en proportion. **WIDTH** des harmonies AUTO : harmonies écartées en stéréo.
 
 | | |
 |---|---|
 | ![auto](dist/apercu-auto.png) | ![doubler](dist/apercu-doubler.png) |
 | ![effects](dist/apercu-effects.png) | ![presets](dist/apercu-presets.png) |
+| ![piano roll](dist/apercu-piano-roll.png) | |
 
 ## Compiler
 

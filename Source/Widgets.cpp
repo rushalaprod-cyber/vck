@@ -538,7 +538,7 @@ void MidiRoll::timerCallback()
     repaint();
 }
 
-void MidiRoll::mouseDown (const juce::MouseEvent&) { proc.restartFree = true; }
+void MidiRoll::mouseDown (const juce::MouseEvent&) { if (onClick) onClick(); else proc.restartFree = true; }
 
 void MidiRoll::paint (juce::Graphics& g)
 {
@@ -559,7 +559,7 @@ void MidiRoll::paint (juce::Graphics& g)
         g.drawText (u8 ("GLISSE UN FICHIER .MID ICI"), r.withTrimmedBottom (r.getHeight() * 0.25f), Justification::centred);
         g.setFont (ui::font (10.f * s));
         g.setColour (ui::dim);
-        g.drawText (u8 ("il se cale tout seul sur le BPM de ton morceau"), r.withTrimmedTop (r.getHeight() * 0.3f), Justification::centred);
+        g.drawText (u8 ("ou clique pour écrire tes notes (piano roll)"), r.withTrimmedTop (r.getHeight() * 0.3f), Justification::centred);
         return;
     }
     const double L = clip.lengthBeats;

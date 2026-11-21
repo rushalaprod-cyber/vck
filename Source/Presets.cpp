@@ -145,7 +145,7 @@ PresetManager::PresetManager (juce::AudioProcessorValueTreeState& s, juce::UndoM
 
 bool PresetManager::keptByPresets (const juce::String& id)
 {
-    return id == "clipOn" || id == "sync" || id == "bpm" || id == "transpose" || id == "rate" || id == "loop"
+    return id == "clipOn" || id == "clipGate" || id == "sync" || id == "bpm" || id == "transpose" || id == "rate" || id == "loop"
         || id == "bypass" || id == "output" || id == "gate" || id == "inGain" || id == "noLatency"
         || id == "key" || id == "scale";
 }

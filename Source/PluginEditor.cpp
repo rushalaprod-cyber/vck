@@ -4,6 +4,7 @@
  #define JucePlugin_VersionString "dev"
 #endif
 #include "UiDraw.h"
+#include "ClipEditor.h"
 using namespace uidraw;
 
 namespace
@@ -56,11 +57,13 @@ VckEditor::VckEditor (VckProcessor& p)
       humanize (p.apvts, "humanize", "HUMANIZE", ui::green, T ("Garde une partie des nuances de ta voix (vibrato, attaques) autour de la note corrigée.")),
       tracking (p.apvts, "tracking", "TRACKING", ui::green, T ("Sensibilité de la détection : bas = sûr (voix nette), haut = suit aussi les voix soufflées.")),
       hold (p.apvts, "hold", "HOLD", ui::green, T ("Temps pendant lequel la note tient quand ta voix s'arrête ou devient une consonne.")),
-      harmLevel (p.apvts, "harmLevel", "HARM LEVEL", ui::green, T ("Niveau des harmonies par rapport à la voix principale.")),
-      autoTrans (p.apvts, "autoTrans", "TRANSPOSE", ui::green, T ("Transpose le robot (demi-tons) par rapport à ta voix.")),
+      harmLevel (p.apvts, "harmLevel", "LEVEL", ui::green, T ("Niveau des harmonies par rapport à la voix principale.")),
+      harmWidth (p.apvts, "harmWidth", "WIDTH", ui::green, T ("Largeur stéréo des harmonies : 0 = au centre, 100 % = écartées à gauche et à droite.")),
+      autoTrans (p.apvts, "autoTrans", "TRANSP.", ui::green, T ("Transpose le robot (demi-tons) par rapport à ta voix.")),
       pitchGraph (p),
       // ---- DOUBLER
       dblVoices (p.apvts, "dblVoices", ui::violet, T ("Doubleur façon Waves Doubler : 2 ou 4 voix.")),
+      dblLink (p.apvts, "dblLink", "LINK", ui::violet, T ("LINK : quand tu tournes un réglage d'une voix, les autres voix suivent dans la même proportion (les écarts gauche / droite et + / - sont gardés).")),
       dblMix (p.apvts, "dblMix", "MIX", ui::violet, T ("Niveau des voix doublées.")),
       dblDirect (p.apvts, "dblDirect", "DIRECT", ui::violet, T ("Niveau du son direct (non doublé).")),
       dblWidth (p.apvts, "dblWidth", "WIDTH", ui::violet, T ("Largeur des voix doublées. Au-delà de 100 % : encore plus large (M/S).")),
@@ -105,6 +108,7 @@ VckEditor::VckEditor (VckProcessor& p)
       rate (p.apvts, "rate", ui::pink, T ("Vitesse du clip : moitié, normale, double.")),
       bpm (p.apvts, "bpm", T ("BPM en mode FREE (ou sans DAW). Glisse pour changer, double-clic = 120.")),
       transpose (p.apvts, "transpose", T ("Transposition du clip MIDI en demi-tons.")),
+      clipGate (p.apvts, "clipGate", T ("GATE : longueur jouée de chaque note du clip. 100 % = comme écrite, moins = plus piqué, plus = plus lié.")),
       voiceView (p),
       noLatency (p.apvts, "noLatency", "NO LATENCY", ui::cyan, T ("Coupé : mode HQ (17 ms compensés par le DAW) — la hauteur est détectée en avance et le limiteur anticipe. Allumé : zéro latence pour chanter en direct.")),
       bypass (p.apvts, "bypass", "BYPASS", ui::red, T ("Écoute le son d'origine (aligné sur la latence).")),
@@ -136,9 +140,9 @@ VckEditor::VckEditor (VckProcessor& p)
                                                                          &vibRate, &velSens, &envA, &envR, &bendRange })
         place (*c, pgCarrier);
     for (juce::Component* c : std::initializer_list<juce::Component*> { &key, &voiceRange, &harmony, &scale, &drone, &retune, &humanize, &tracking,
-                                                                         &hold, &harmLevel, &autoTrans, &pitchGraph })
+                                                                         &hold, &harmLevel, &harmWidth, &autoTrans, &pitchGraph })
         place (*c, pgAuto);
-    for (juce::Component* c : std::initializer_list<juce::Component*> { &dblVoices, &dblMix, &dblDirect, &dblWidth, &dblDetune, &dblDelay, &dblDrift,
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &dblVoices, &dblLink, &dblMix, &dblDirect, &dblWidth, &dblDetune, &dblDelay, &dblDrift,
                                                                          &dblRate, &dblHpf, &dblLpf })
         place (*c, pgDoubler);
     for (auto* k : dblVoiceKnobs) place (*k, pgDoubler);
@@ -146,7 +150,7 @@ VckEditor::VckEditor (VckProcessor& p)
                                                                          &delayMix, &delayFb, &delayTone, &delayTime, &pingPong, &reverb, &revSize,
                                                                          &revPre, &revDamp, &revWidth })
         place (*c, pgEffects);
-    for (juce::Component* c : std::initializer_list<juce::Component*> { &source, &robot, &voice, &width, &output, &roll, &importMidiBtn, &clearMidiBtn,
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &source, &robot, &voice, &width, &output, &roll, &importMidiBtn, &clearMidiBtn, &editMidiBtn, &clipGate,
                                                                          &clipOn, &loop, &sync, &rate, &bpm, &transpose, &voiceView,
                                                                          &noLatency, &bypass, &undoBtn, &redoBtn, &resetBtn, &prevBtn, &nextBtn,
                                                                          &saveBtn, &folderBtn, &importBtn, &copyBtn, &presetNameBtn })
@@ -159,6 +163,12 @@ VckEditor::VckEditor (VckProcessor& p)
     importMidiBtn.setTooltip (T ("Charge un fichier .mid : la mélodie / les accords joueront le robot, calés sur le tempo."));
     clearMidiBtn.setTooltip (T ("Retire le clip MIDI."));
     importMidiBtn.onClick = [this] { importMidi(); };
+    editMidiBtn.setButtonText ("EDIT");
+    editMidiBtn.setColour (juce::TextButton::buttonOnColourId, ui::pink);
+    editMidiBtn.setTooltip (T ("Ouvre le piano roll : écris, déplace, allonge les notes, change la longueur de la boucle. Tout reste calé sur le BPM."));
+    editMidiBtn.onClick = [this] { openClipEditor(); };
+    roll.onClick = [this] { openClipEditor(); };
+    roll.setTooltip (T ("Clic : ouvre le piano roll. Glisse un .mid ici pour l'importer."));
     clearMidiBtn.onClick = [this] { proc.clearMidi(); };
 
     // ---- en-tete (comme ravenn)
@@ -181,7 +191,7 @@ VckEditor::VckEditor (VckProcessor& p)
     importBtn.setTooltip (T ("Importe des fichiers .preset (copiés dans ton dossier de presets)"));
     importBtn.onClick = [this] { importPresets(); };
     presetNameBtn.setTooltip (T ("Ouvre la page des presets"));
-    presetNameBtn.onClick = [this] { showBrowser (! browser.isVisible()); };
+    presetNameBtn.onClick = [this] { if (clipPage != nullptr) clipPage->setVisible (false); showBrowser (! browser.isVisible()); };
     for (int i = 0; i < 4; ++i)
     {
         auto* b = slotBtns.add (new juce::TextButton (juce::String::charToString ((juce::juce_wchar) ('A' + i))));
@@ -221,6 +231,12 @@ VckEditor::VckEditor (VckProcessor& p)
         addAndMakeVisible (t);
     }
 
+    // ---- piano roll
+    clipPage = std::make_unique<ClipEditorPage> (p);
+    addChildComponent (*clipPage);
+    clipPage->onClose = [this] { clipPage->setVisible (false); };
+    clipPage->onImport = [this] { importMidi(); };
+
     // ---- page des presets
     addChildComponent (browser);
     browser.onClose = [this] { browser.setVisible (false); };
@@ -255,6 +271,12 @@ VckEditor::VckEditor (VckProcessor& p)
 
 VckEditor::~VckEditor() { setLookAndFeel (nullptr); }
 
+void VckEditor::openClipEditor()
+{
+    browser.setVisible (false);
+    clipPage->open();
+}
+
 void VckEditor::place (juce::Component& c, int pg)
 {
     pageOf.push_back ({ &c, pg });
@@ -268,6 +290,7 @@ void VckEditor::setPage (int pg)
     for (int i = 0; i < tabs.size(); ++i) tabs[i]->setToggleState (i == page, juce::dontSendNotification);
     shownVoices = -1;
     browser.toFront (false);
+    if (clipPage != nullptr) clipPage->toFront (false);
     repaint();
 }
 
@@ -495,7 +518,7 @@ void VckEditor::paint (juce::Graphics& g)
     };
     tag (bands, "BANDS"); tag (wave, "WAVE"); tag (mode, "MODE"); tag (octave, "OCTAVE");
     tag (key, "KEY"); tag (scale, "SCALE"); tag (voiceRange, "VOIX"); tag (harmony, "HARMONY");
-    tag (sync, "SYNC"); tag (rate, "RATE"); tag (bpm, "BPM"); tag (transpose, "TRANSPOSE");
+    tag (sync, "SYNC"); tag (rate, "RATE"); tag (bpm, "BPM"); tag (transpose, "TRANSP."); tag (clipGate, "GATE");
     tag (source, "SOURCE"); tag (delayTime, "TIME");
 
     // doubleur : titres des colonnes de voix
@@ -632,15 +655,18 @@ void VckEditor::resized()
     voiceView.setBounds (R (26, 108, 770, 228));
     panel ("MIDI", ui::pink, 820, 82, 408, 262, -1);
     midiInfoArea = R (1010, 90, 206, 18);
-    roll.setBounds (R (834, 112, 380, 130));
-    importMidiBtn.setBounds (R (830, 248, 122, 32));
-    clearMidiBtn.setBounds (R (954, 248, 70, 32));
-    clipOn.setBounds (R (1026, 248, 96, 32));
-    loop.setBounds (R (1124, 248, 96, 32));
-    sync.setBounds (R (830, 300, 96, 30));
-    rate.setBounds (R (932, 300, 104, 30));
-    bpm.setBounds (R (1042, 300, 84, 30));
-    transpose.setBounds (R (1132, 300, 86, 30));
+    roll.setBounds (R (834, 112, 380, 112));
+    importMidiBtn.setBounds (R (830, 230, 106, 32));
+    editMidiBtn.setBounds (R (938, 230, 76, 32));
+    clearMidiBtn.setBounds (R (1016, 230, 62, 32));
+    clipOn.setBounds (R (1080, 230, 68, 32));
+    loop.setBounds (R (1150, 230, 70, 32));
+    sync.setBounds (R (830, 284, 84, 30));
+    rate.setBounds (R (918, 284, 96, 30));
+    bpm.setBounds (R (1018, 284, 72, 30));
+    transpose.setBounds (R (1094, 284, 62, 30));
+    clipGate.setBounds (R (1160, 284, 58, 30));
+    if (clipPage != nullptr) clipPage->setBounds (getLocalBounds().withTrimmedTop (roundToInt (70 * s)));
 
     // ---- onglets
     for (int i = 0; i < tabs.size(); ++i) tabs[i]->setBounds (R (12.f + (float) i * 152.f, 354, 148, 32));
@@ -688,12 +714,13 @@ void VckEditor::resized()
     panel ("PITCH", ui::green, 508, 394, 488, 300, pgAuto);
     pitchGraph.setBounds (R (522, 424, 460, 258));
     panel ("HARMONIES", ui::green, 508, 706, 488, 162, pgAuto);
-    harmony.setBounds (R (522, 762, 250, 30));
-    row ({ &harmLevel, &autoTrans }, 780, 730, 104, 132, 104);
+    harmony.setBounds (R (522, 762, 200, 30));
+    row ({ &harmLevel, &harmWidth, &autoTrans }, 728, 730, 86, 132, 88);
 
     // ---- DOUBLER
     panel ("DOUBLER", ui::violet, 12, 394, 984, 170, pgDoubler);
-    dblVoices.setBounds (R (26, 430, 96, 120));
+    dblVoices.setBounds (R (26, 428, 96, 86));
+    dblLink.setBounds (R (26, 520, 96, 32));
     row ({ &dblMix, &dblDirect, &dblWidth, &dblDetune, &dblDelay, &dblDrift, &dblRate, &dblHpf, &dblLpf }, 132, 424, 92, 134, 95);
     panel ("VOIX", ui::violet, 12, 576, 984, 292, pgDoubler);
     dblColsArea = R (20, 604, 968, 258);
@@ -719,5 +746,6 @@ void VckEditor::resized()
 
     background = {};
     browser.toFront (false);
+    if (clipPage != nullptr) clipPage->toFront (false);
     repaint();
 }

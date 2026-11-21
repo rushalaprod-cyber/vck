@@ -122,6 +122,7 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     bool dropHover = false;
+    std::function<void()> onClick;
 private:
     void timerCallback() override;
     VckProcessor& proc;
@@ -172,6 +173,8 @@ private:
     juce::Rectangle<int> panel, tileArea;
 };
 
+class ClipEditorPage;
+
 //==============================================================================
 class VckEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, private juce::Timer
 {
@@ -187,6 +190,7 @@ public:
     void fileDragExit (const juce::StringArray&) override { roll.dropHover = dragHover = false; repaint(); }
     void filesDropped (const juce::StringArray& files, int, int) override;
     void showBrowser (bool show) { browser.refresh(); browser.setVisible (show); browser.toFront (false); }
+    void openClipEditor();
 
 private:
     void timerCallback() override;
@@ -216,10 +220,11 @@ private:
     Segmented key, voiceRange, harmony;
     ChoiceBox scale;
     Pill drone;
-    NeonKnob retune, humanize, tracking, hold, harmLevel, autoTrans;
+    NeonKnob retune, humanize, tracking, hold, harmLevel, harmWidth, autoTrans;
     PitchGraph pitchGraph;
     // DOUBLER
     Segmented dblVoices;
+    Pill dblLink;
     NeonKnob dblMix, dblDirect, dblWidth, dblDetune, dblDelay, dblDrift, dblRate, dblHpf, dblLpf;
     juce::OwnedArray<NeonKnob> dblVoiceKnobs;   // 4 voix x (delay, detune, pan, gain)
     // EFFECTS
@@ -232,10 +237,10 @@ private:
     NeonKnob robot, voice, width, output;
     // MIDI
     MidiRoll roll;
-    juce::TextButton importMidiBtn, clearMidiBtn;
+    juce::TextButton importMidiBtn, clearMidiBtn, editMidiBtn;
     Pill clipOn, loop;
     Segmented sync, rate;
-    ValueBox bpm, transpose;
+    ValueBox bpm, transpose, clipGate;
     VoiceView voiceView;
 
     // en-tete facon ravenn
@@ -243,6 +248,7 @@ private:
     juce::TextButton undoBtn, redoBtn, resetBtn, prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" }, folderBtn, importBtn, copyBtn, presetNameBtn;
     juce::OwnedArray<juce::TextButton> slotBtns, tabs;
     PresetBrowser browser;
+    std::unique_ptr<ClipEditorPage> clipPage;
     std::unique_ptr<juce::FileChooser> chooser;
 
     std::vector<Panel> panels;

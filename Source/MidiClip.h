@@ -8,7 +8,7 @@
 
 namespace vck
 {
-struct ClipNote { double start = 0, len = 0.25; int note = 60; float vel = 0.8f; };
+struct ClipNote { double start = 0, len = 0.25; int note = 60; float vel = 0.8f; bool selected = false; };
 
 struct Clip
 {
@@ -31,7 +31,7 @@ struct Clip
         {
             auto p = juce::StringArray::fromTokens (tok, ",", "");
             if (p.size() != 4) continue;
-            notes.push_back ({ p[0].getDoubleValue(), p[1].getDoubleValue(), p[2].getIntValue(), (float) p[3].getDoubleValue() });
+            notes.push_back ({ p[0].getDoubleValue(), p[1].getDoubleValue(), p[2].getIntValue(), (float) p[3].getDoubleValue(), false });
         }
         lengthBeats = len > 0 ? len : computeLength();
     }
@@ -42,7 +42,29 @@ struct Clip
         return std::max (4.0, std::ceil (end / 4.0 - 1e-6) * 4.0);   // arrondi a la mesure (4/4)
     }
 
-    // Lecture d'un .mid : toutes les pistes fusionnees, cale sur la premiere mesure
+    // Ecriture d'un .mid (960 ticks par noire, tempo du morceau)
+    bool save (const juce::File& f, double bpm) const
+    {
+        juce::MidiMessageSequence seq;
+        const double tpq = 960.0;
+        auto tempo = juce::MidiMessage::tempoMetaEvent ((int) std::round (60000000.0 / std::max (1.0, bpm)));
+        tempo.setTimeStamp (0);
+        seq.addEvent (tempo);
+        for (auto& n : notes)
+        {
+            seq.addEvent (juce::MidiMessage::noteOn (1, n.note, juce::jlimit (0.01f, 1.f, n.vel)), n.start * tpq);
+            seq.addEvent (juce::MidiMessage::noteOff (1, n.note), (n.start + n.len) * tpq - 1.0);
+        }
+        seq.updateMatchedPairs();
+        juce::MidiFile mf;
+        mf.setTicksPerQuarterNote ((int) tpq);
+        mf.addTrack (seq);
+        f.deleteFile();
+        juce::FileOutputStream os (f);
+        return os.openedOk() && mf.writeTo (os);
+    }
+
+    // Lecture d'un .mid    // (toutes les pistes fusionnees, calees sur la premiere mesure)
     static bool load (const juce::File& f, Clip& out, juce::String& error)
     {
         juce::FileInputStream in (f);
@@ -68,7 +90,7 @@ struct Clip
                 // en SMPTE, on suppose 120 BPM pour revenir en temps
                 const double s = smpte ? on * 2.0 : on / tpq;
                 const double l = smpte ? (off - on) * 2.0 : (off - on) / tpq;
-                c.notes.push_back ({ s, std::max (0.02, l), e->message.getNoteNumber(), e->message.getFloatVelocity() });
+                c.notes.push_back ({ s, std::max (0.02, l), e->message.getNoteNumber(), e->message.getFloatVelocity(), false });
             }
         }
         if (c.notes.empty()) { error = "Aucune note dans ce fichier"; return false; }
@@ -100,7 +122,7 @@ public:
 
     // beatStart : position (en noires) du debut du bloc ; beatsPerSample : avance par echantillon
     void process (const Clip& clip, double beatStart, double beatsPerSample, int numSamples,
-                  int transpose, bool loop, juce::MidiBuffer& out)
+                  int transpose, bool loop, juce::MidiBuffer& out, double gate = 1.0)
     {
         if (sent.size() != clip.notes.size()) { stopAll (out); sent.assign (clip.notes.size(), -1); }
         const double L = clip.lengthBeats;
@@ -120,7 +142,7 @@ public:
                 for (size_t i = 0; i < clip.notes.size(); ++i)
                 {
                     auto& n = clip.notes[i];
-                    if (n.start < p - 1e-9 && n.start + n.len > p + 0.02)
+                    if (n.start < p - 1e-9 && n.start + n.len * gate > p + 0.02)
                         events.push_back ({ 0, false, n.note, n.vel, (int) i });
                 }
             }
@@ -144,7 +166,7 @@ public:
                 auto& n = clip.notes[i];
                 if (n.start >= la && n.start < lb)
                     events.push_back ({ toSample (cycle + n.start, beatStart, beatsPerSample, numSamples), false, n.note, n.vel, (int) i });
-                double e = n.start + n.len;
+                double e = n.start + std::max (0.01, std::min (n.len * gate, L - 0.001));
                 if (loop && e > L) e -= L;          // note qui deborde sur le tour suivant
                 if (e >= la && e < lb)
                     events.push_back ({ toSample (cycle + e, beatStart, beatsPerSample, numSamples), true, n.note, 0.f, (int) i });

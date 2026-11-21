@@ -4,7 +4,7 @@
 #ifndef BuildDir
   #define BuildDir "..\..\build\vck_artefacts\Release"
 #endif
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.0"
 
 [Setup]
 AppId={{4E9C2B17-8A3D-4F61-B5C2-9D7E1A0C3F58}

@@ -16,13 +16,13 @@ namespace ui
     const juce::Colour track   { 0xff121821 };
     const juce::Colour text    { 0xffe9eef3 };
     const juce::Colour dim     { 0xff738191 };
-    const juce::Colour violet  { 0xff3d7bff };   // bleu electrique
-    const juce::Colour cyan    { 0xff9ccfff };   // glace
-    const juce::Colour pink    { 0xff6f93c4 };   // acier bleute
-    const juce::Colour red     { 0xfff4f7fb };   // blanc os
-    const juce::Colour amber   { 0xffc9d6e3 };   // argent
-    const juce::Colour green   { 0xff5fb4ff };   // bleu clair
-    const juce::Colour blue    { 0xff2f5fd0 };   // bleu nuit
+    const juce::Colour violet  { 0xff3d7bff };
+    const juce::Colour cyan    { 0xff9ccfff };
+    const juce::Colour pink    { 0xff6f93c4 };
+    const juce::Colour red     { 0xfff4f7fb };
+    const juce::Colour amber   { 0xffc9d6e3 };
+    const juce::Colour green   { 0xff5fb4ff };
+    const juce::Colour blue    { 0xff2f5fd0 };
     juce::Image blurred (const juce::Image& src, int w, int h, int smallSize = 40);
 }
 
@@ -58,7 +58,6 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att;
 };
 
-// Petite case de valeur (BPM, transposition) : glisser verticalement, double-clic = defaut
 class ValueBox : public juce::Component
 {
 public:
@@ -104,7 +103,6 @@ private:
 };
 
 //==============================================================================
-// Vue de la voix : enveloppe de chaque bande, porteuse, notes jouees
 class VoiceView : public juce::Component, private juce::Timer
 {
 public:
@@ -117,7 +115,6 @@ private:
     float inL = 0.f, outL = 0.f, sib = 0.f;
 };
 
-// Clip MIDI : piano roll, tete de lecture, depot de fichier
 class MidiRoll : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
 {
 public:
@@ -132,6 +129,49 @@ private:
     int version = -1;
 };
 
+// Graphe de hauteur (facon correcteur) : voix detectee et note du robot
+class PitchGraph : public juce::Component, private juce::Timer
+{
+public:
+    explicit PitchGraph (VckProcessor& p) : proc (p) { startTimerHz (30); setInterceptsMouseClicks (false, false); }
+    void paint (juce::Graphics&) override;
+private:
+    void timerCallback() override { repaint(); }
+    VckProcessor& proc;
+    float centre = 60.f;
+};
+
+// Reponse du banc de filtres (bandes, plage, finesse) + niveau de chaque bande
+class BankView : public juce::Component, private juce::Timer
+{
+public:
+    explicit BankView (VckProcessor& p) : proc (p) { startTimerHz (25); setInterceptsMouseClicks (false, false); }
+    void paint (juce::Graphics&) override;
+private:
+    void timerCallback() override { repaint(); }
+    VckProcessor& proc;
+};
+
+// Page des presets (comme ravenn) : categories, recherche, tuiles
+class PresetBrowser : public juce::Component
+{
+public:
+    explicit PresetBrowser (VckProcessor& p);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();
+    void syncSelection();
+    std::function<void()> onClose, onSave, onImport, onExport;
+private:
+    void rebuildTiles();
+    VckProcessor& proc;
+    juce::TextEditor search;
+    juce::TextButton closeBtn, saveBtn { "SAVE" }, importBtn { "IMPORT" }, folderBtn, exportBtn { "EXPORT" };
+    juce::OwnedArray<juce::TextButton> catBtns, tiles;
+    juce::String category { "TOUS" };
+    juce::Rectangle<int> panel, tileArea;
+};
+
 //==============================================================================
 class VckEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, private juce::Timer
 {
@@ -140,67 +180,79 @@ public:
     ~VckEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    void setPage (int page);
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray&, int, int) override { roll.dropHover = dragHover = true; repaint(); }
     void fileDragExit (const juce::StringArray&) override { roll.dropHover = dragHover = false; repaint(); }
     void filesDropped (const juce::StringArray& files, int, int) override;
-
-    void loadPresetById (int id);
+    void showBrowser (bool show) { browser.refresh(); browser.setVisible (show); browser.toFront (false); }
 
 private:
     void timerCallback() override;
-    void rebuildPresetBox();
+    void refreshPresets();
     void savePreset();
+    void importPresets();
     void importMidi();
     void showMessage (const juce::String& m);
     void buildBackground (float pxScale);
+    void place (juce::Component& c, int page);
 
-    struct Panel { juce::String title; juce::Colour colour; juce::Rectangle<int> area; };
+    struct Panel { juce::String title; juce::Colour colour; juce::Rectangle<int> area; int page; };
 
     VckProcessor& proc;
     VckLookAndFeel lnf;
     juce::TooltipWindow tooltips { this, 500 };
 
-    // vocoder
+    // VOCODER
     Segmented bands;
-    NeonKnob formant, sharp, bright, gate, attack, release, sibil;
+    NeonKnob loFreq, hiFreq, sharp, spread, inGain, gate, attack, release, formant, bright, character, sibil, breath;
     Pill freeze;
-    // porteuse
-    Segmented source, wave, mode, octave;
-    NeonKnob unison, detune, glide, vibrato, noise, envA, envR;
-    // auto
-    Segmented key, harmony;
+    BankView bankView;
+    // CARRIER
+    Segmented wave, mode, octave;
+    NeonKnob unison, detune, sub, noise, glide, vibrato, vibRate, velSens, envA, envR, bendRange;
+    // AUTO
+    Segmented key, voiceRange, harmony;
     ChoiceBox scale;
-    NeonKnob retune;
-    // midi
+    Pill drone;
+    NeonKnob retune, humanize, tracking, hold, harmLevel, autoTrans;
+    PitchGraph pitchGraph;
+    // DOUBLER
+    Segmented dblVoices;
+    NeonKnob dblMix, dblDirect, dblWidth, dblDetune, dblDelay, dblDrift, dblRate, dblHpf, dblLpf;
+    juce::OwnedArray<NeonKnob> dblVoiceKnobs;   // 4 voix x (delay, detune, pan, gain)
+    // EFFECTS
+    NeonKnob drive, lowCut, highCut, comp, ensemble, ensRate, phaser, phRate, phDepth,
+             delayMix, delayFb, delayTone, reverb, revSize, revPre, revDamp, revWidth;
+    ChoiceBox delayTime;
+    Pill pingPong;
+    // OUTPUT (toujours visible)
+    Segmented source;
+    NeonKnob robot, voice, width, output;
+    // MIDI
     MidiRoll roll;
-    juce::TextButton importBtn, clearBtn;
+    juce::TextButton importMidiBtn, clearMidiBtn;
     Pill clipOn, loop;
     Segmented sync, rate;
     ValueBox bpm, transpose;
-    // doubleur / effets / sortie
-    Segmented dblVoices;
-    NeonKnob dblDetune, dblDelay, dblWidth, dblDrift, dblMix;
-    NeonKnob ensemble, delayMix, delayFb, reverb, revSize;
-    ChoiceBox delayTime;
-    NeonKnob robot, voice, output;
-    Pill bypass;
     VoiceView voiceView;
 
-    juce::ComboBox presetBox;
-    juce::TextButton prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" };
+    // en-tete facon ravenn
+    Pill noLatency, bypass;
+    juce::TextButton undoBtn, redoBtn, resetBtn, prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" }, folderBtn, importBtn, copyBtn, presetNameBtn;
+    juce::OwnedArray<juce::TextButton> slotBtns, tabs;
+    PresetBrowser browser;
     std::unique_ptr<juce::FileChooser> chooser;
-    std::unique_ptr<juce::AlertWindow> saveDialog;
 
     std::vector<Panel> panels;
-    juce::Rectangle<int> header, logoArea, infoArea, autoInfoArea, midiInfoArea, msgArea;
+    std::vector<std::pair<juce::Component*, int>> pageOf;
+    juce::Rectangle<int> header, logoArea, infoArea, autoInfoArea, midiInfoArea, msgArea, statusArea, dblColsArea, carrierInfoArea;
     juce::Image background, ravenImg, ravenCrisp, coverImg;
-    juce::String shownPreset, shownInfo, message;
-    int messageTicks = 0, shownSource = -1;
+    juce::String shownPreset, message;
+    int messageTicks = 0, page = 0, bgPage = -1, shownAB = -1, shownVoices = -1;
     float bgScale = 0.f;
     bool dragHover = false;
-    juce::Component *autoPanelComps[5] {}, *midiPanelComps[9] {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VckEditor)
 };

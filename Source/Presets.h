@@ -3,37 +3,52 @@
 #include <vector>
 #include <utility>
 
-// Texte UTF-8 (accents) -> juce::String
 inline juce::String u8 (const char* s) { return juce::String::fromUTF8 (s); }
 
-struct FactoryPreset
-{
-    const char* name;
-    const char* category;
-    const char* info;                                    // ce que fait le preset / la reference
-    std::vector<std::pair<const char*, float>> values;   // valeurs reelles (index pour les listes)
-};
-
+// Presets facon ravenn : usine par categories + presets utilisateur (.preset dans
+// Documents/vck/Presets), import / export, precedent / suivant. Un chargement = une
+// seule etape d'undo. La gamme (KEY / SCALE), le clip MIDI, le niveau d'entree, le
+// gate, la sortie, le bypass et le mode de latence ne sont jamais changes par un preset.
 class PresetManager
 {
 public:
-    explicit PresetManager (juce::AudioProcessorValueTreeState& s) : st (s) {}
+    struct Factory
+    {
+        juce::String name, category, info;
+        std::vector<std::pair<juce::String, float>> values;
+    };
 
-    static const std::vector<FactoryPreset>& factory();
-    static juce::StringArray categories();
+    PresetManager (juce::AudioProcessorValueTreeState& s, juce::UndoManager& u);
 
-    juce::File userDir() const;
-    juce::StringArray userNames() const;
+    static bool keptByPresets (const juce::String& id);
 
-    void loadFactory (int index);
-    bool loadUser (const juce::String& name);
-    bool saveUser (const juce::String& name);
-    void resetToDefaults();
+    void load (const juce::String& name);
+    bool save (const juce::String& name);
+    bool remove (const juce::String& name);
+    void next();
+    void previous();
+    int importFiles (const juce::Array<juce::File>& files);
+    void openFolder() const;
+    static juce::File getDirectory();
 
-    juce::String currentName { "Init" }, currentInfo;
-    int currentFactory = 0;      // -1 = preset utilisateur
+    juce::StringArray getFactoryNames() const;
+    std::vector<std::pair<juce::String, juce::StringArray>> getFactoryByCategory() const;
+    juce::StringArray getUserNames() const;
+    juce::StringArray getAllNames() const;
+    bool isFactory (const juce::String& name) const;
+    juce::String getInfo (const juce::String& name) const;
+    const std::vector<Factory>& getFactory() const { return factory; }
+
+    juce::String getCurrent() const { return current; }
+    void setCurrentName (const juce::String& n) { current = n; }
+
+    // ecrit une valeur dans l'arbre de l'APVTS (avec ou sans undo)
+    void setTreeValue (const juce::String& id, float value, juce::UndoManager* um);
 
 private:
-    void setParam (const juce::String& id, float realValue);
-    juce::AudioProcessorValueTreeState& st;
+    void resetForPreset (juce::UndoManager* um);
+    juce::AudioProcessorValueTreeState& state;
+    juce::UndoManager& undo;
+    std::vector<Factory> factory;
+    juce::String current;
 };

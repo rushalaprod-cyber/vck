@@ -61,7 +61,7 @@ jobs:
 
       - name: Validation Audio Unit (auval)
         run: |
-          sudo installer -pkg dist/vck-1.0.0-macos.pkg -target /
+          sudo installer -pkg dist/vck-1.1.0-macos.pkg -target /
           killall -9 AudioComponentRegistrar || true
           auval -v aumf Vckv Vckd
 

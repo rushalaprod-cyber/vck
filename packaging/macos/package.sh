@@ -5,7 +5,7 @@ set -euo pipefail
 
 ART="$1"
 OUT="$2"
-VER="1.0.0"
+VER="1.1.0"
 STAGE="$(mktemp -d)"
 mkdir -p "$OUT" "$STAGE/vst3" "$STAGE/au" "$STAGE/app"
 OUT="$(cd "$OUT" && pwd)"   # chemin absolu : le zip est cree apres un cd

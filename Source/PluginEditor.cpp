@@ -3,770 +3,243 @@
 #ifndef JucePlugin_VersionString
  #define JucePlugin_VersionString "dev"
 #endif
+#include "UiDraw.h"
+using namespace uidraw;
 
 namespace
 {
-    constexpr float baseW = 1240.f, baseH = 880.f;
-
-    // Cadre "fer forge" de ravenn : fond translucide, fer brosse, filet lumineux, equerres
-    void drawPanelFrame (juce::Graphics& g, juce::Rectangle<float> a, juce::Colour accent, float s)
-    {
-        using namespace juce;
-        const float rad = 3.f * s;
-        g.setColour (Colours::black.withAlpha (0.45f));
-        g.fillRoundedRectangle (a.translated (0, 3.f * s), rad);
-        g.setGradientFill (ColourGradient (Colour (0xff0b0f15).withAlpha (0.74f), a.getX(), a.getY(),
-                                           Colour (0xff040508).withAlpha (0.86f), a.getX(), a.getBottom(), false));
-        g.fillRoundedRectangle (a, rad);
-        {
-            Graphics::ScopedSaveState ss (g);
-            g.reduceClipRegion (a.reduced (1.f).toNearestInt());
-            uint32_t seed = (uint32_t) (a.getX() * 13.f + a.getY() * 7.f) + 1u;
-            for (float y = a.getY(); y < a.getBottom(); y += 2.f)
-            {
-                seed = seed * 1664525u + 1013904223u;
-                const float v = (float) (seed >> 8) / 16777216.f;
-                g.setColour ((v > 0.5f ? Colours::white : Colours::black).withAlpha (0.012f + 0.02f * std::abs (v - 0.5f)));
-                g.fillRect (a.getX(), y, a.getWidth(), 1.f);
-            }
-            g.setColour (Colours::white.withAlpha (0.045f));
-            g.fillRect (a.getX() + 2.f, a.getY() + 1.f, a.getWidth() - 4.f, 1.f);
-            g.setColour (Colours::black.withAlpha (0.5f));
-            g.fillRect (a.getX() + 2.f, a.getBottom() - 2.f, a.getWidth() - 4.f, 1.f);
-        }
-        g.setColour (ui::edge.withAlpha (0.9f));
-        g.drawRoundedRectangle (a.reduced (0.5f), rad, 1.f);
-        g.setGradientFill (ColourGradient (accent.withAlpha (0.0f), a.getX(), a.getY(),
-                                           accent.withAlpha (0.55f), a.getCentreX(), a.getY(), true));
-        g.fillRect (a.withHeight (1.f).reduced (a.getWidth() * 0.08f, 0));
-        const float L = 10.f * s, t = 1.4f * s;
-        g.setColour (Colour (0xffc7d2dd).withAlpha (0.55f));
-        for (auto c : { a.getTopLeft(), a.getTopRight(), a.getBottomLeft(), a.getBottomRight() })
-        {
-            const float sx = c.x < a.getCentreX() ? 1.f : -1.f, sy = c.y < a.getCentreY() ? 1.f : -1.f;
-            g.fillRect (Rectangle<float> (c.x, c.y, L * sx, t * sy).withPosition (jmin (c.x, c.x + L * sx), jmin (c.y, c.y + t * sy)));
-            g.fillRect (Rectangle<float> (c.x, c.y, t * sx, L * sy).withPosition (jmin (c.x, c.x + t * sx), jmin (c.y, c.y + L * sy)));
-        }
-    }
-
-    void drawPanelTitle (juce::Graphics& g, juce::Rectangle<float> a, const juce::String& t, juce::Colour accent, float s)
-    {
-        using namespace juce;
-        auto r = a.reduced (14.f * s, 10.f * s).removeFromTop (16.f * s);
-        const float d = 7.f * s;
-        Path diamond;
-        diamond.addPolygon ({ r.getX() + d * 0.5f, r.getCentreY() }, 4, d * 0.5f, 0.f);
-        g.setColour (accent);
-        g.fillPath (diamond);
-        g.setColour (ui::text.withAlpha (0.9f));
-        const auto f = ui::font (11.f * s, true, 0.32f);
-        g.setFont (f);
-        auto tr2 = r.withTrimmedLeft (d + 8.f * s);
-        g.drawText (t, tr2, Justification::centredLeft);
-        const float tw = GlyphArrangement::getStringWidth (f, t);
-        const float x0 = tr2.getX() + tw + 10.f * s, x1 = r.getRight();
-        if (x1 - x0 > 20.f * s)
-        {
-            g.setGradientFill (ColourGradient (ui::edge.brighter (0.6f).withAlpha (0.7f), x0, 0, ui::edge.withAlpha (0.0f), x1, 0, false));
-            g.fillRect (Rectangle<float> (x0, r.getCentreY(), x1 - x0, 1.f));
-        }
-    }
-
-    juce::String noteName (float n)
-    {
-        if (n < 0.f) return "-";
-        return juce::MidiMessage::getMidiNoteName (juce::roundToInt (n), true, true, 3);
-    }
-}
-
-//==============================================================================
-VckLookAndFeel::VckLookAndFeel()
-{
-    using namespace juce;
-    setColour (ResizableWindow::backgroundColourId, ui::bg);
-    setColour (Label::textColourId, ui::text);
-    setColour (Slider::rotarySliderFillColourId, ui::violet);
-    setColour (ComboBox::backgroundColourId, ui::panel);
-    setColour (ComboBox::outlineColourId, ui::edge);
-    setColour (ComboBox::textColourId, ui::text);
-    setColour (ComboBox::arrowColourId, ui::dim);
-    setColour (PopupMenu::backgroundColourId, Colour (0xff0b0f16));
-    setColour (PopupMenu::highlightedBackgroundColourId, ui::violet.withAlpha (0.35f));
-    setColour (PopupMenu::textColourId, ui::text);
-    setColour (PopupMenu::highlightedTextColourId, Colours::white);
-    setColour (PopupMenu::headerTextColourId, ui::cyan);
-    setColour (TextButton::buttonColourId, ui::panel);
-    setColour (TextButton::buttonOnColourId, ui::violet);
-    setColour (TextButton::textColourOffId, ui::text.withAlpha (0.8f));
-    setColour (TextButton::textColourOnId, Colours::white);
-    setColour (TooltipWindow::backgroundColourId, Colour (0xff0b0f16));
-    setColour (TooltipWindow::textColourId, ui::text);
-    setColour (TooltipWindow::outlineColourId, ui::edge);
-    setColour (AlertWindow::backgroundColourId, Colour (0xff0b0f16));
-    setColour (AlertWindow::textColourId, ui::text);
-    setColour (AlertWindow::outlineColourId, ui::edge);
-    setColour (TextEditor::backgroundColourId, ui::bg);
-    setColour (TextEditor::textColourId, ui::text);
-    setColour (TextEditor::outlineColourId, ui::edge);
-    setColour (TextEditor::focusedOutlineColourId, ui::violet);
-}
-
-void VckLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,
-                                       float startAngle, float endAngle, juce::Slider& slider)
-{
-    using namespace juce;
-    const float size = (float) jmin (w, h);
-    auto b = Rectangle<float> ((float) x, (float) y, (float) w, (float) h).withSizeKeepingCentre (size, size).reduced (size * 0.05f);
-    const float radius = b.getWidth() * 0.5f;
-    if (radius < 8.f) return;
-    const auto c = b.getCentre();
-    const float lw = jmax (2.5f, radius * 0.085f);
-    const float arcR = radius - lw;
-    const auto fill = slider.findColour (Slider::rotarySliderFillColourId);
-    const auto fill2 = fill.withRotatedHue (-0.09f).brighter (0.25f);
-    const PathStrokeType stroke (lw, PathStrokeType::curved, PathStrokeType::rounded);
-
-    for (int i = 0; i <= 30; ++i)
-    {
-        const float a = startAngle + (float) i / 30.f * (endAngle - startAngle);
-        const auto pt = c.getPointOnCircumference (radius - lw * 0.1f + lw * 0.55f, a);
-        const float d = (i % 5 == 0) ? lw * 0.30f : lw * 0.16f;
-        g.setColour (ui::dim.withAlpha (i % 5 == 0 ? 0.55f : 0.3f));
-        g.fillEllipse (pt.x - d, pt.y - d, d * 2.f, d * 2.f);
-    }
-    Path trackPath;
-    trackPath.addCentredArc (c.x, c.y, arcR, arcR, 0.f, startAngle, endAngle, true);
-    g.setColour (ui::track);
-    g.strokePath (trackPath, stroke);
-
-    float zero = 0.f;
-    if (slider.getMinimum() < 0.0 && slider.getMaximum() > 0.0)
-        zero = (float) slider.valueToProportionOfLength (0.0);
-    const float a0 = startAngle + zero * (endAngle - startAngle);
-    const float a1 = startAngle + pos * (endAngle - startAngle);
-    if (std::abs (a1 - a0) > 0.002f)
-    {
-        Path val;
-        val.addCentredArc (c.x, c.y, arcR, arcR, 0.f, jmin (a0, a1), jmax (a0, a1), true);
-        for (int i = 4; i >= 1; --i)
-        {
-            g.setColour (fill.withAlpha (0.055f));
-            g.strokePath (val, PathStrokeType (lw * (1.f + (float) i * 0.9f), PathStrokeType::curved, PathStrokeType::rounded));
-        }
-        g.setGradientFill (ColourGradient (fill, b.getX(), b.getBottom(), fill2, b.getRight(), b.getY(), false));
-        g.strokePath (val, stroke);
-    }
-    const float kr = arcR - lw * 1.75f;
-    g.setColour (Colours::black.withAlpha (0.55f));
-    g.fillEllipse (c.x - kr, c.y - kr + kr * 0.08f, kr * 2.f, kr * 2.f);
-    g.setGradientFill (ColourGradient (Colour (0xff27303c), c.x - kr * 0.3f, c.y - kr * 0.7f,
-                                       Colour (0xff05070a), c.x + kr * 0.4f, c.y + kr, true));
-    g.fillEllipse (c.x - kr, c.y - kr, kr * 2.f, kr * 2.f);
-    g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.18f), c.x, c.y - kr,
-                                       Colours::white.withAlpha (0.0f), c.x, c.y + kr, false));
-    g.drawEllipse (c.x - kr, c.y - kr, kr * 2.f, kr * 2.f, 1.f);
-    g.setColour (fill.withAlpha (0.10f));
-    g.drawEllipse (c.x - kr * 0.80f, c.y - kr * 0.80f, kr * 1.6f, kr * 1.6f, 1.f);
-    g.setColour (Colours::black.withAlpha (0.6f));
-    g.drawEllipse (c.x - kr - 1.5f, c.y - kr - 1.5f, kr * 2.f + 3.f, kr * 2.f + 3.f, 1.2f);
-    const auto p0 = c.getPointOnCircumference (kr * 0.62f, a1), p1 = c.getPointOnCircumference (kr * 0.93f, a1);
-    const float bw = jmax (1.6f, lw * 0.32f);
-    g.setColour (fill.withAlpha (0.30f));
-    g.drawLine ({ p0, p1 }, bw * 3.2f);
-    g.setColour (Colours::white.withAlpha (0.95f));
-    g.drawLine ({ p0, p1 }, bw);
-    const auto txt = slider.getTextFromValue (slider.getValue());
-    g.setColour (ui::text);
-    g.setFont (ui::font (jmax (8.5f, kr * 0.30f), true));
-    g.drawFittedText (txt, Rectangle<float> (kr * 1.5f, kr * 0.6f).withCentre (c).toNearestInt(),
-                      Justification::centred, 1, 0.8f);
-}
-
-void VckLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float, float,
-                                       juce::Slider::SliderStyle, juce::Slider& s)
-{
-    using namespace juce;
-    auto r = Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (3.f);
-    const float rad = jmin (4.f, r.getHeight() * 0.2f);
-    const auto accent = s.findColour (Slider::rotarySliderFillColourId);
-    g.setColour (Colour (0xff0b0f15));
-    g.fillRoundedRectangle (r, rad);
-    auto fillR = r.withWidth (jmax (0.f, pos - r.getX()));
-    g.setColour (accent.withAlpha (0.22f));
-    g.fillRoundedRectangle (fillR, rad);
-    g.setColour (accent.withAlpha (s.isMouseOverOrDragging() ? 0.8f : 0.4f));
-    g.drawRoundedRectangle (r.reduced (0.5f), rad, 1.f);
-    g.setColour (ui::text);
-    g.setFont (ui::font (jlimit (8.f, 15.f, r.getHeight() * 0.42f), true, 0.05f));
-    g.drawFittedText (s.getTextFromValue (s.getValue()), r.toNearestInt(), Justification::centred, 1, 0.7f);
-}
-
-void VckLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool hover, bool down)
-{
-    using namespace juce;
-    auto r = b.getLocalBounds().toFloat().reduced (3.f);
-    const float rad = jmin (4.f, r.getHeight() * 0.2f);
-    const auto accent = b.findColour (TextButton::buttonOnColourId);
-    const float alpha = b.isEnabled() ? 1.f : 0.35f;
-    if (b.getToggleState())
-    {
-        for (int i = 3; i >= 1; --i)
-        {
-            g.setColour (accent.withAlpha (0.10f * alpha));
-            g.fillRoundedRectangle (r.expanded ((float) i), rad + (float) i);
-        }
-        g.setGradientFill (ColourGradient (accent.brighter (0.3f).withMultipliedAlpha (alpha), r.getX(), r.getY(),
-                                           accent.darker (0.45f).withMultipliedAlpha (alpha), r.getX(), r.getBottom(), false));
-        g.fillRoundedRectangle (r, rad);
-        g.setColour (Colours::white.withAlpha (0.22f * alpha));
-        g.drawRoundedRectangle (r.reduced (0.5f), rad, 1.f);
-    }
-    else
-    {
-        g.setColour (Colour (0xff0b0f15).brighter (hover ? 0.12f : 0.f).withMultipliedAlpha (alpha));
-        g.fillRoundedRectangle (r, rad);
-        g.setColour (accent.withAlpha ((hover ? 0.75f : 0.32f) * alpha));
-        g.drawRoundedRectangle (r.reduced (0.5f), rad, 1.f);
-    }
-    if (down)
-    {
-        g.setColour (Colours::white.withAlpha (0.10f));
-        g.fillRoundedRectangle (r, rad);
-    }
-}
-
-void VckLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool)
-{
-    using namespace juce;
-    auto col = b.findColour (b.getToggleState() ? TextButton::textColourOnId : TextButton::textColourOffId);
-    if (b.getToggleState() && b.findColour (TextButton::buttonOnColourId).getPerceivedBrightness() > 0.7f)
-        col = Colour (0xff05080d);
-    col = col.withMultipliedAlpha (b.isEnabled() ? 1.f : 0.4f);
-    g.setColour (col);
-    const float h = (float) b.getHeight();
-    auto f = ui::font (jlimit (8.f, 16.f, h * 0.36f), true, 0.08f);
-    const float w = (float) b.getWidth();
-    int padX = jmax (6, roundToInt (h * 0.28f));
-    const int padY = jmax (2, roundToInt (h * 0.12f));
-    const auto text = b.getButtonText();
-    auto textW = [&] { GlyphArrangement ga; ga.addLineOfText (f, text, 0.f, 0.f); return ga.getBoundingBox (0, -1, true).getWidth(); };
-    float tw = textW();
-    if (tw > w - 2.f * (float) padX)
-    {
-        padX = jmax (3, roundToInt (h * 0.14f));
-        const float avail = w - 2.f * (float) padX;
-        if (tw > avail && tw > 0.f) f = f.withHeight (jmax (7.f, f.getHeight() * avail / tw));
-    }
-    g.setFont (f);
-    g.drawFittedText (text, b.getLocalBounds().reduced (padX, padY), Justification::centred, 1, 0.7f);
-}
-
-void VckLookAndFeel::drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox& box)
-{
-    using namespace juce;
-    auto r = Rectangle<float> (0, 0, (float) w, (float) h).reduced (3.f);
-    const float rad = jmin (4.f, r.getHeight() * 0.2f);
-    g.setColour (Colour (0xff0b0f15));
-    g.fillRoundedRectangle (r, rad);
-    g.setColour (ui::violet.withAlpha (box.isMouseOver (true) ? 0.7f : 0.35f));
-    g.drawRoundedRectangle (r.reduced (0.5f), rad, 1.f);
-    Path arrow;
-    const float ax = r.getRight() - r.getHeight() * 0.5f - 6.f, ay = r.getCentreY();
-    const float as = jmax (3.f, r.getHeight() * 0.12f);
-    arrow.startNewSubPath (ax - as, ay - as * 0.5f);
-    arrow.lineTo (ax, ay + as * 0.5f);
-    arrow.lineTo (ax + as, ay - as * 0.5f);
-    g.setColour (ui::dim);
-    g.strokePath (arrow, PathStrokeType (1.5f, PathStrokeType::curved, PathStrokeType::rounded));
-}
-
-void VckLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& label)
-{
-    label.setBounds (box.getLocalBounds().reduced (box.getHeight() / 2, 1).withTrimmedRight (box.getHeight() / 3));
-    label.setFont (getComboBoxFont (box));
-}
-juce::Font VckLookAndFeel::getComboBoxFont (juce::ComboBox& b) { return ui::font (juce::jlimit (9.f, 18.f, (float) b.getHeight() * 0.42f), true); }
-juce::Font VckLookAndFeel::getPopupMenuFont() { return ui::font (15.f); }
-juce::Font VckLookAndFeel::getLabelFont (juce::Label& l) { return ui::font (juce::jlimit (9.f, 22.f, (float) l.getHeight() * 0.7f)); }
-
-//==============================================================================
-NeonKnob::NeonKnob (juce::AudioProcessorValueTreeState& s, const juce::String& id, const juce::String& t,
-                    juce::Colour c, const juce::String& tip)
-    : title (t)
-{
-    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    slider.setColour (juce::Slider::rotarySliderFillColourId, c);
-    slider.setTooltip (tip);
-    slider.setMouseDragSensitivity (220);
-    addAndMakeVisible (slider);
-    att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (s, id, slider);
-    if (auto* prm = s.getParameter (id))
-        slider.setDoubleClickReturnValue (true, prm->convertFrom0to1 (prm->getDefaultValue()));
-}
-void NeonKnob::resized()
-{
-    auto r = getLocalBounds();
-    r.removeFromBottom (juce::jmax (14, getHeight() / 7));
-    slider.setBounds (r);
-}
-void NeonKnob::paint (juce::Graphics& g)
-{
-    const int lh = juce::jmax (14, getHeight() / 7);
-    auto r = getLocalBounds().removeFromBottom (lh);
-    g.setColour (ui::text.withAlpha (0.78f));
-    g.setFont (ui::font (juce::jlimit (8.f, 14.f, (float) lh * 0.72f), true, 0.16f));
-    g.drawFittedText (title, r, juce::Justification::centred, 1, 0.7f);
-}
-
-ValueBox::ValueBox (juce::AudioProcessorValueTreeState& s, const juce::String& id, const juce::String& tip)
-{
-    slider.setSliderStyle (juce::Slider::LinearBar);
-    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    slider.setColour (juce::Slider::rotarySliderFillColourId, ui::pink);
-    slider.setSliderSnapsToMousePosition (false);
-    slider.setVelocityBasedMode (false);
-    slider.setMouseDragSensitivity (300);
-    slider.setTooltip (tip);
-    addAndMakeVisible (slider);
-    att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (s, id, slider);
-    if (auto* prm = s.getParameter (id))
-        slider.setDoubleClickReturnValue (true, prm->convertFrom0to1 (prm->getDefaultValue()));
-}
-
-Segmented::Segmented (juce::AudioProcessorValueTreeState& s, const juce::String& id, juce::Colour c,
-                      const juce::String& tip, juce::StringArray labels)
-{
-    auto* prm = dynamic_cast<juce::AudioParameterChoice*> (s.getParameter (id));
-    jassert (prm != nullptr);
-    if (labels.isEmpty()) labels = prm->choices;
-    for (int i = 0; i < labels.size(); ++i)
-    {
-        auto* b = buttons.add (new juce::TextButton (labels[i]));
-        b->setColour (juce::TextButton::buttonOnColourId, c);
-        b->setTooltip (tip);
-        b->onClick = [this, i] { attachment->setValueAsCompleteGesture ((float) i); };
-        addAndMakeVisible (b);
-    }
-    attachment = std::make_unique<juce::ParameterAttachment> (*prm, [this] (float v)
-    {
-        const int idx = juce::roundToInt (v);
-        for (int i = 0; i < buttons.size(); ++i) buttons[i]->setToggleState (i == idx, juce::dontSendNotification);
-    });
-    attachment->sendInitialUpdate();
-}
-void Segmented::resized()
-{
-    auto r = getLocalBounds();
-    const int n = buttons.size();
-    if (n == 0) return;
-    const int cols = columns > 0 ? columns : n, rows = (n + cols - 1) / cols, gap = 1;
-    const int w = (r.getWidth() - gap * (cols - 1)) / cols, h = (r.getHeight() - gap * (rows - 1)) / rows;
-    for (int i = 0; i < n; ++i)
-        buttons[i]->setBounds (r.getX() + (i % cols) * (w + gap), r.getY() + (i / cols) * (h + gap), w, h);
-}
-
-Pill::Pill (juce::AudioProcessorValueTreeState& s, const juce::String& id, const juce::String& text,
-            juce::Colour c, const juce::String& tip)
-{
-    button.setButtonText (text);
-    button.setClickingTogglesState (true);
-    button.setColour (juce::TextButton::buttonOnColourId, c);
-    button.setTooltip (tip);
-    addAndMakeVisible (button);
-    att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (s, id, button);
-}
-
-ChoiceBox::ChoiceBox (juce::AudioProcessorValueTreeState& s, const juce::String& id, const juce::String& tip)
-{
-    if (auto* prm = dynamic_cast<juce::AudioParameterChoice*> (s.getParameter (id)))
-        box.addItemList (prm->choices, 1);
-    box.setTooltip (tip);
-    box.setJustificationType (juce::Justification::centred);
-    addAndMakeVisible (box);
-    att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (s, id, box);
-}
-
-juce::Image ui::blurred (const juce::Image& src, int w, int h, int smallSize)
-{
-    using namespace juce;
-    if (! src.isValid() || w <= 0 || h <= 0) return {};
-    const float sa = (float) src.getWidth() / (float) src.getHeight(), da = (float) w / (float) h;
-    Rectangle<int> crop = sa > da ? Rectangle<int> ((int) ((float) src.getHeight() * da), src.getHeight())
-                                  : Rectangle<int> (src.getWidth(), (int) ((float) src.getWidth() / da));
-    crop = crop.withCentre (src.getBounds().getCentre());
-    auto small = src.getClippedImage (crop).rescaled (jmax (4, (int) ((float) smallSize * jmax (1.f, da))), smallSize,
-                                                      Graphics::highResamplingQuality);
-    auto mid = small.rescaled (small.getWidth() * 4, small.getHeight() * 4, Graphics::highResamplingQuality);
-    mid = mid.convertedToFormat (Image::ARGB);
-    ImageConvolutionKernel k (9);
-    k.createGaussianBlur (3.5f);
-    k.applyToImage (mid, mid, mid.getBounds());
-    return mid.rescaled (w, h, Graphics::highResamplingQuality);
-}
-
-//==============================================================================
-VoiceView::VoiceView (VckProcessor& p) : proc (p) { startTimerHz (40); setInterceptsMouseClicks (false, false); }
-
-void VoiceView::timerCallback()
-{
-    const int n = proc.uiBands.load();
-    for (int i = 0; i < n; ++i)
-    {
-        const float m = proc.uiMod[(size_t) i].load(), o = proc.uiOut[(size_t) i].load();
-        mod[(size_t) i] += 0.55f * (m - mod[(size_t) i]);
-        out[(size_t) i] += 0.55f * (o - out[(size_t) i]);
-        peak[(size_t) i] = std::max (mod[(size_t) i], peak[(size_t) i] * 0.97f);
-    }
-    inL = std::max (proc.uiInLevel.load(), inL * 0.85f);
-    outL = std::max (proc.uiOutLevel.load(), outL * 0.85f);
-    sib += 0.4f * (proc.uiUnvoiced.load() - sib);
-    repaint();
-}
-
-void VoiceView::paint (juce::Graphics& g)
-{
-    using namespace juce;
-    const float s = (float) getWidth() / 768.f;
-    auto r = getLocalBounds().toFloat();
-    auto meters = r.removeFromRight (44.f * s);
-    auto keys = r.removeFromBottom (30.f * s);
-    r.removeFromBottom (16.f * s);
-    auto plot = r.withTrimmedTop (22.f * s);
-
-    // fond + grille
-    g.setColour (Colours::black.withAlpha (0.35f));
-    g.fillRoundedRectangle (plot.expanded (2.f), 3.f);
-    auto yOf = [&] (float db) { return plot.getBottom() - plot.getHeight() * jlimit (0.f, 1.f, (db + 66.f) / 66.f); };
-    g.setFont (ui::font (8.5f * s, true));
-    for (float db : { -12.f, -24.f, -36.f, -48.f, -60.f })
-    {
-        const float y = yOf (db);
-        g.setColour (ui::edge.withAlpha (0.45f));
-        g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
-        g.setColour (ui::dim.withAlpha (0.6f));
-        g.drawText (String ((int) db), Rectangle<float> (plot.getRight() - 26.f * s, y - 10.f * s, 24.f * s, 10.f * s), Justification::centredRight);
-    }
-
-    const int n = proc.uiBands.load();
-    if (n > 0)
-    {
-        const float bw = plot.getWidth() / (float) n;
-        const float gap = jmax (1.f, bw * 0.16f);
-        for (int i = 0; i < n; ++i)
-        {
-            const float x = plot.getX() + (float) i * bw;
-            const float dbM = vck::gainToDb (mod[(size_t) i] * 2.4f);
-            const float dbO = vck::gainToDb (out[(size_t) i] * 2.4f);
-            const float yM = yOf (dbM), yO = yOf (dbO), yP = yOf (vck::gainToDb (peak[(size_t) i] * 2.4f));
-            auto bar = Rectangle<float> (x + gap * 0.5f, yM, bw - gap, plot.getBottom() - yM);
-            g.setGradientFill (ColourGradient (ui::blue.withAlpha (0.55f), 0, plot.getBottom(), ui::cyan.withAlpha (0.9f), 0, plot.getY(), false));
-            g.fillRect (bar);
-            g.setColour (Colours::white.withAlpha (0.65f));
-            g.fillRect (x + gap * 0.5f, yP - 1.f, bw - gap, 1.5f);
-            // sortie du robot : trait lumineux
-            if (dbO > -66.f)
-            {
-                g.setColour (ui::violet.withAlpha (0.35f));
-                g.fillRect (x + gap * 0.5f, yO - 3.f, bw - gap, 6.f);
-                g.setColour (Colours::white);
-                g.fillRect (x + gap * 0.5f, yO - 0.75f, bw - gap, 1.5f);
-            }
-        }
-        // reperes de frequence
-        g.setFont (ui::font (9.f * s, true, 0.1f));
-        g.setColour (ui::dim);
-        const float f0 = proc.uiFreq[0].load(), f1 = proc.uiFreq[(size_t) n - 1].load();
-        if (f0 > 0.f && f1 > f0)
-            for (float f : { 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f })
-            {
-                if (f < f0 || f > f1) continue;
-                const float t = std::log (f / f0) / std::log (f1 / f0);
-                const float x = plot.getX() + bw * 0.5f + t * (plot.getWidth() - bw);
-                g.drawText (f >= 1000.f ? String ((int) (f / 1000.f)) + "k" : String ((int) f),
-                            Rectangle<float> (x - 20.f * s, plot.getBottom() + 2.f * s, 40.f * s, 12.f * s), Justification::centred);
-            }
-    }
-
-    // en-tete : etat de la porteuse
-    const int source = (int) proc.apvts.getRawParameterValue ("source")->load();
-    auto head = getLocalBounds().toFloat().withTrimmedRight (40.f * s).removeFromTop (18.f * s);
-    g.setFont (ui::font (11.f * s, true, 0.12f));
-    String left, hint;
-    if (source == 1)
-    {
-        const float hz = proc.uiPitchHz.load(), tn = proc.uiTargetNote.load();
-        left = hz > 0.f ? "AUTO   VOIX " + noteName (vck::ftom (hz)) + "  " + String (hz, 0) + " Hz   >   ROBOT " + noteName (tn)
-                        : String ("AUTO   chante : la porteuse suit ta voix");
-    }
-    else if (source == 0)
-    {
-        int cnt = 0;
-        for (auto& w : proc.uiNotes) { auto b = w.load(); while (b) { cnt += (int) (b & 1u); b >>= 1; } }
-        left = "MIDI   " + String (cnt) + (cnt > 1 ? " notes" : " note");
-        if (cnt == 0) hint = u8 ("Joue des notes MIDI sur la piste de vck, ou glisse un fichier .mid");
-    }
-    else
-    {
-        left = "SIDECHAIN";
-        if (! proc.uiScConnected.load()) hint = u8 ("Active l'entrée sidechain de vck dans ton DAW et envoie-y un synthé");
-    }
-    g.setColour (ui::text);
-    g.drawText (left, head, Justification::centredLeft);
-    if (sib > 0.25f)
-    {
-        g.setColour (ui::cyan.withAlpha (jlimit (0.f, 1.f, sib)));
-        g.drawText ("CONSONNE", head, Justification::centredRight);
-    }
-    if (hint.isNotEmpty())
-    {
-        g.setColour (ui::dim);
-        g.setFont (ui::font (12.f * s, true, 0.05f));
-        g.drawFittedText (hint, plot.reduced (20.f * s).toNearestInt(), Justification::centredTop, 2);
-    }
-
-    // clavier : notes de la porteuse (glace) et notes MIDI recues (bleu)
-    {
-        const int lo = 24, hi = 96;
-        int whites = 0;
-        for (int k = lo; k <= hi; ++k) if (! MidiMessage::isMidiNoteBlack (k)) ++whites;
-        const float ww = keys.getWidth() / (float) whites;
-        auto on = [&] (const std::array<std::atomic<uint32_t>, 4>& a, int k) { return (a[(size_t) (k >> 5)].load() >> (k & 31)) & 1u; };
-        float x = keys.getX();
-        std::vector<std::pair<float, int>> blacks;
-        for (int k = lo; k <= hi; ++k)
-        {
-            if (MidiMessage::isMidiNoteBlack (k)) { blacks.push_back ({ x, k }); continue; }
-            auto kr = Rectangle<float> (x, keys.getY(), ww - 1.f, keys.getHeight());
-            g.setColour (on (proc.uiNotes, k) ? ui::cyan : (on (proc.uiInNotes, k) ? ui::violet : Colour (0xffc9d2dc).withAlpha (0.82f)));
-            g.fillRoundedRectangle (kr, 1.5f);
-            if (k % 12 == 0)
-            {
-                g.setColour (Colours::black.withAlpha (0.55f));
-                g.setFont (ui::font (7.5f * s, true));
-                g.drawText ("C" + String (k / 12 - 1), kr.removeFromBottom (11.f * s), Justification::centred);
-            }
-            x += ww;
-        }
-        for (auto& b : blacks)
-        {
-            auto kr = Rectangle<float> (b.first - ww * 0.32f, keys.getY(), ww * 0.64f, keys.getHeight() * 0.6f);
-            g.setColour (on (proc.uiNotes, b.second) ? ui::cyan : (on (proc.uiInNotes, b.second) ? ui::violet : Colour (0xff0a0d12)));
-            g.fillRoundedRectangle (kr, 1.5f);
-        }
-    }
-
-    // vu-metres entree / sortie
-    auto drawMeter = [&] (Rectangle<float> m, float lv, const String& t)
-    {
-        auto lab = m.removeFromBottom (12.f * s).withSizeKeepingCentre (24.f * s, 12.f * s);
-        g.setColour (Colours::black.withAlpha (0.45f));
-        g.fillRoundedRectangle (m, 2.f);
-        const float h = m.getHeight() * jlimit (0.f, 1.f, (vck::gainToDb (lv) + 60.f) / 60.f);
-        g.setGradientFill (ColourGradient (ui::blue, 0, m.getBottom(), ui::red, 0, m.getY(), false));
-        g.fillRoundedRectangle (m.withTop (m.getBottom() - h), 2.f);
-        g.setColour (ui::dim);
-        g.setFont (ui::font (8.f * s, true));
-        g.drawText (t, lab, Justification::centred);
-    };
-    meters.removeFromLeft (8.f * s);
-    drawMeter (meters.removeFromLeft (16.f * s).withTrimmedTop (22.f * s), inL, "IN");
-    meters.removeFromLeft (4.f * s);
-    drawMeter (meters.removeFromLeft (16.f * s).withTrimmedTop (22.f * s), outL, "OUT");
-}
-
-//==============================================================================
-MidiRoll::MidiRoll (VckProcessor& p) : proc (p)
-{
-    startTimerHz (30);
-    setTooltip (u8 ("Clip MIDI : glisse un .mid ici. Les notes suivent le tempo du DAW (ou le BPM en FREE). Clic : relancer le clip en mode FREE."));
-}
-
-void MidiRoll::timerCallback()
-{
-    if (proc.clipVersion.load() != version) { version = proc.clipVersion.load(); clip = proc.getClipCopy(); }
-    repaint();
-}
-
-void MidiRoll::mouseDown (const juce::MouseEvent&) { proc.restartFree = true; }
-
-void MidiRoll::paint (juce::Graphics& g)
-{
-    using namespace juce;
-    const float s = (float) getWidth() / 380.f;
-    auto r = getLocalBounds().toFloat();
-    g.setColour (Colours::black.withAlpha (0.45f));
-    g.fillRoundedRectangle (r, 3.f);
-    if (clip.empty())
-    {
-        Path border; border.addRoundedRectangle (r.reduced (2.f), 4.f);
-        Path dashed; const float dl[] = { 5.f, 4.f };
-        PathStrokeType (1.f).createDashedStroke (dashed, border, dl, 2);
-        g.setColour ((dropHover ? ui::cyan : ui::dim).withAlpha (0.8f));
-        g.fillPath (dashed);
-        g.setFont (ui::font (13.f * s, true, 0.15f));
-        g.setColour (dropHover ? ui::cyan : ui::text);
-        g.drawText (u8 ("GLISSE UN FICHIER .MID ICI"), r.withTrimmedBottom (r.getHeight() * 0.25f), Justification::centred);
-        g.setFont (ui::font (10.f * s));
-        g.setColour (ui::dim);
-        g.drawText (u8 ("il se cale tout seul sur le BPM de ton morceau"), r.withTrimmedTop (r.getHeight() * 0.3f), Justification::centred);
-        return;
-    }
-    const double L = clip.lengthBeats;
-    int lo = 127, hi = 0;
-    for (auto& n : clip.notes) { lo = std::min (lo, n.note); hi = std::max (hi, n.note); }
-    lo -= 2; hi += 2;
-    auto plot = r.reduced (4.f).withTrimmedTop (14.f * s);
-    const float nh = plot.getHeight() / (float) (hi - lo + 1);
-    auto xOf = [&] (double b) { return plot.getX() + (float) (b / L) * plot.getWidth(); };
-
-    for (int b = 0; b <= (int) L; ++b)
-    {
-        const bool bar = b % 4 == 0;
-        g.setColour (ui::edge.withAlpha (bar ? 0.9f : 0.35f));
-        g.drawVerticalLine ((int) xOf (b), plot.getY(), plot.getBottom());
-        if (bar && b < (int) L)
-        {
-            g.setColour (ui::dim);
-            g.setFont (ui::font (8.f * s, true));
-            g.drawText (String (b / 4 + 1), Rectangle<float> (xOf (b) + 2.f, r.getY() + 2.f, 20.f, 11.f * s), Justification::centredLeft);
-        }
-    }
-    const float pb = proc.playBeat.load();
-    for (auto& n : clip.notes)
-    {
-        auto nr = Rectangle<float> (xOf (n.start), plot.getBottom() - (float) (n.note - lo + 1) * nh,
-                                    jmax (2.f, xOf (n.start + n.len) - xOf (n.start) - 1.f), jmax (2.f, nh - 1.f));
-        const bool playing = pb >= 0.f && pb >= (float) n.start && pb < (float) (n.start + n.len);
-        g.setColour ((playing ? ui::red : ui::cyan.interpolatedWith (ui::blue, 1.f - n.vel)).withAlpha (playing ? 1.f : 0.85f));
-        g.fillRoundedRectangle (nr, 1.5f);
-    }
-    if (pb >= 0.f)
-    {
-        const float x = xOf (pb);
-        g.setColour (ui::red.withAlpha (0.25f));
-        g.fillRect (x - 3.f, plot.getY(), 6.f, plot.getHeight());
-        g.setColour (ui::red);
-        g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
-    }
-    g.setColour (ui::text);
-    g.setFont (ui::font (9.f * s, true, 0.08f));
-    g.drawText (clip.name + "  -  " + String ((int) (L / 4)) + " mes.  " + String ((int) clip.notes.size()) + " notes",
-                Rectangle<float> (r.getX() + 30.f * s, r.getY() + 1.f, r.getWidth() - 34.f * s, 12.f * s), Justification::centredRight);
-    if (dropHover)
-    {
-        g.setColour (ui::cyan.withAlpha (0.25f));
-        g.fillRoundedRectangle (r, 3.f);
-    }
-}
-
-//==============================================================================
-namespace tips
-{
-    static juce::String t (const char* s) { return u8 (s); }
+    juce::String T (const char* s) { return juce::String::fromUTF8 (s); }
+    enum Page { pgVocoder = 0, pgCarrier, pgAuto, pgDoubler, pgEffects, numPages };
 }
 
 VckEditor::VckEditor (VckProcessor& p)
     : AudioProcessorEditor (p), proc (p),
-      bands (p.apvts, "bands", ui::violet, tips::t ("Nombre de bandes : peu = robot rétro, beaucoup = voix précise et intelligible.")),
-      formant (p.apvts, "formant", "FORMANT", ui::violet, tips::t ("Déplace les formants : + = voix plus petite / aiguë, - = voix plus grosse / grave, sans changer la note.")),
-      sharp (p.apvts, "sharp", "SHARP", ui::violet, tips::t ("Finesse des bandes : bas = doux et fondu, haut = précis et métallique.")),
-      bright (p.apvts, "bright", "BRIGHT", ui::violet, tips::t ("Brillance : remonte les aigus de la voix pour plus d'intelligibilité.")),
-      gate (p.apvts, "gate", "GATE", ui::violet, tips::t ("Seuil du gate : coupe le robot quand tu ne chantes pas (souffle, bruit de pièce).")),
-      attack (p.apvts, "attack", "ATTACK", ui::cyan, tips::t ("Vitesse de réaction du robot aux syllabes.")),
-      release (p.apvts, "release", "RELEASE", ui::cyan, tips::t ("Durée de retombée : court = haché et robotique, long = lié et fluide.")),
-      sibil (p.apvts, "sibil", "SIBILANCE", ui::cyan, tips::t ("Consonnes (s, ch, t, f) : les laisse passer pour qu'on comprenne les paroles.")),
-      freeze (p.apvts, "freeze", "FREEZE", ui::cyan, tips::t ("Fige la voyelle en cours : le robot tient le son pendant que la porteuse joue.")),
-      source (p.apvts, "source", ui::cyan, tips::t ("Ce qui joue les notes du robot : MIDI (clavier ou fichier .mid), AUTO (suit ta voix, sans MIDI) ou SIDECHAIN (un synthé externe)."),
-              juce::StringArray { "MIDI", "AUTO  (suit la voix)", "SIDECHAIN" }),
-      wave (p.apvts, "wave", ui::cyan, tips::t ("Forme d'onde de la porteuse : SAW = classique, SQUARE = creux, PULSE = nasal, SUPER = large, BUZZ = robot dur, NOISE = chuchoté.")),
-      mode (p.apvts, "mode", ui::cyan, tips::t ("POLY = accords, MONO = une note (glide toujours), LEGATO = glide seulement sur les notes liées (talkbox).")),
-      octave (p.apvts, "octave", ui::cyan, tips::t ("Octave de la porteuse.")),
-      unison (p.apvts, "unison", "UNISON", ui::cyan, tips::t ("Nombre d'oscillateurs par note : épaissit le son.")),
-      detune (p.apvts, "detune", "DETUNE", ui::cyan, tips::t ("Écart entre les oscillateurs de l'unisson.")),
-      glide (p.apvts, "glide", "GLIDE", ui::cyan, tips::t ("Glissement entre les notes (portamento).")),
-      vibrato (p.apvts, "vibrato", "VIBRATO", ui::cyan, tips::t ("Vibrato naturel, qui arrive après l'attaque de la note.")),
-      noise (p.apvts, "noise", "NOISE", ui::cyan, tips::t ("Ajoute du souffle à la porteuse : plus aérien.")),
-      envA (p.apvts, "envA", "ENV ATT", ui::pink, tips::t ("Attaque des notes de la porteuse.")),
-      envR (p.apvts, "envR", "ENV REL", ui::pink, tips::t ("Relâchement des notes de la porteuse.")),
-      key (p.apvts, "key", ui::green, tips::t ("Tonalité du morceau (mode AUTO).")),
-      harmony (p.apvts, "harmony", ui::green, tips::t ("Harmonies automatiques ajoutées à ta voix, dans la gamme choisie.")),
-      scale (p.apvts, "scale", tips::t ("Gamme : la note du robot est calée dessus. LIBRE = suit ta voix exactement, DRONE = toujours la tonique (robot monotone).")),
-      retune (p.apvts, "retune", "RETUNE", ui::green, tips::t ("Vitesse de correction : 0 = effet autotune dur, plus haut = plus naturel.")),
+      // ---- VOCODER
+      bands (p.apvts, "bands", ui::violet, T ("Nombre de bandes : peu = robot rétro, beaucoup = voix précise et intelligible. Le changement se fait en fondu, sans clic.")),
+      loFreq (p.apvts, "loFreq", "LOW", ui::violet, T ("Fréquence de la bande la plus grave.")),
+      hiFreq (p.apvts, "hiFreq", "HIGH", ui::violet, T ("Fréquence de la bande la plus aiguë.")),
+      sharp (p.apvts, "sharp", "SHARP", ui::violet, T ("Finesse des bandes : bas = doux et fondu, haut = précis et métallique.")),
+      spread (p.apvts, "spread", "SPREAD", ui::violet, T ("Bandes alternées gauche / droite : un robot en stéréo.")),
+      inGain (p.apvts, "inGain", "INPUT", ui::cyan, T ("Niveau de la voix qui entre dans vck (règle le gate et la détection).")),
+      gate (p.apvts, "gate", "GATE", ui::cyan, T ("Seuil du gate (avec hystérésis et maintien : il ne hache jamais la voix).")),
+      attack (p.apvts, "attack", "ATTACK", ui::cyan, T ("Vitesse de réaction du robot aux syllabes.")),
+      release (p.apvts, "release", "RELEASE", ui::cyan, T ("Durée de retombée : court = haché et robotique, long = lié et fluide.")),
+      formant (p.apvts, "formant", "FORMANT", ui::pink, T ("Déplace les formants : + = voix plus petite, - = voix plus grosse, sans changer la note.")),
+      bright (p.apvts, "bright", "BRIGHT", ui::pink, T ("Brillance : remonte les aigus de la voix pour plus d'intelligibilité.")),
+      character (p.apvts, "character", "CHARACTER", ui::pink, T ("0 = intelligibilité maximale. Plus haut = on entend davantage le timbre de la porteuse (onde, synthé).")),
+      sibil (p.apvts, "sibil", "CONSONNES", ui::pink, T ("Laisse passer les consonnes (s, ch, t, f) de ta voix.")),
+      breath (p.apvts, "breath", "SOUFFLE", ui::pink, T ("Souffle ajouté à la porteuse sur les consonnes : des « s » naturels plutôt que buzzés.")),
+      freeze (p.apvts, "freeze", "FREEZE", ui::cyan, T ("Fige la voyelle en cours.")),
+      bankView (p),
+      // ---- CARRIER
+      wave (p.apvts, "wave", ui::cyan, T ("SAW classique, SQUARE creux, PULSE nasal, SUPER large, BUZZ robot dur, NOISE chuchoté.")),
+      mode (p.apvts, "mode", ui::cyan, T ("POLY = accords, MONO = une note (glide toujours), LEGATO = glide sur les notes liées (talkbox).")),
+      octave (p.apvts, "octave", ui::cyan, T ("Octave de la porteuse.")),
+      unison (p.apvts, "unison", "UNISON", ui::cyan, T ("Oscillateurs par note : épaissit le son.")),
+      detune (p.apvts, "detune", "DETUNE", ui::cyan, T ("Écart entre les oscillateurs de l'unisson.")),
+      sub (p.apvts, "sub", "SUB", ui::cyan, T ("Oscillateur une octave en dessous : plus de corps.")),
+      noise (p.apvts, "noise", "NOISE", ui::cyan, T ("Souffle permanent dans la porteuse.")),
+      glide (p.apvts, "glide", "GLIDE", ui::cyan, T ("Glissement entre les notes.")),
+      vibrato (p.apvts, "vibrato", "VIBRATO", ui::cyan, T ("Vibrato naturel, qui arrive après l'attaque.")),
+      vibRate (p.apvts, "vibRate", "VIB RATE", ui::cyan, T ("Vitesse du vibrato.")),
+      velSens (p.apvts, "velSens", "VELOCITY", ui::cyan, T ("Sensibilité à la vélocité MIDI.")),
+      envA (p.apvts, "envA", "ENV ATT", ui::pink, T ("Attaque des notes.")),
+      envR (p.apvts, "envR", "ENV REL", ui::pink, T ("Relâchement des notes.")),
+      bendRange (p.apvts, "bendRange", "BEND", ui::pink, T ("Amplitude du pitch bend (demi-tons).")),
+      // ---- AUTO
+      key (p.apvts, "key", ui::green, T ("Tonalité du morceau. Jamais changée par un preset.")),
+      voiceRange (p.apvts, "voiceRange", ui::green, T ("Tessiture de ta voix : évite les erreurs d'octave. LARGE = tout.")),
+      harmony (p.apvts, "harmony", ui::green, T ("Harmonies ajoutées automatiquement, dans la gamme.")),
+      scale (p.apvts, "scale", T ("Gamme du morceau (jamais changée par un preset). LIBRE = suit ta voix exactement.")),
+      drone (p.apvts, "drone", "DRONE", ui::green, T ("Robot monotone : la porteuse reste sur la tonique, quelle que soit la note chantée.")),
+      retune (p.apvts, "retune", "RETUNE", ui::green, T ("Vitesse de correction : 0 = autotune dur, plus haut = plus naturel.")),
+      humanize (p.apvts, "humanize", "HUMANIZE", ui::green, T ("Garde une partie des nuances de ta voix (vibrato, attaques) autour de la note corrigée.")),
+      tracking (p.apvts, "tracking", "TRACKING", ui::green, T ("Sensibilité de la détection : bas = sûr (voix nette), haut = suit aussi les voix soufflées.")),
+      hold (p.apvts, "hold", "HOLD", ui::green, T ("Temps pendant lequel la note tient quand ta voix s'arrête ou devient une consonne.")),
+      harmLevel (p.apvts, "harmLevel", "HARM LEVEL", ui::green, T ("Niveau des harmonies par rapport à la voix principale.")),
+      autoTrans (p.apvts, "autoTrans", "TRANSPOSE", ui::green, T ("Transpose le robot (demi-tons) par rapport à ta voix.")),
+      pitchGraph (p),
+      // ---- DOUBLER
+      dblVoices (p.apvts, "dblVoices", ui::violet, T ("Doubleur façon Waves Doubler : 2 ou 4 voix.")),
+      dblMix (p.apvts, "dblMix", "MIX", ui::violet, T ("Niveau des voix doublées.")),
+      dblDirect (p.apvts, "dblDirect", "DIRECT", ui::violet, T ("Niveau du son direct (non doublé).")),
+      dblWidth (p.apvts, "dblWidth", "WIDTH", ui::violet, T ("Largeur des voix doublées. Au-delà de 100 % : encore plus large (M/S).")),
+      dblDetune (p.apvts, "dblDetune", "DETUNE x", ui::violet, T ("Multiplie le désaccord de toutes les voix.")),
+      dblDelay (p.apvts, "dblDelay", "DELAY x", ui::violet, T ("Multiplie le retard de toutes les voix.")),
+      dblDrift (p.apvts, "dblDrift", "DRIFT", ui::violet, T ("Dérive naturelle de hauteur et de placement (comme un vrai double).")),
+      dblRate (p.apvts, "dblRate", "RATE", ui::violet, T ("Vitesse de la dérive.")),
+      dblHpf (p.apvts, "dblHpf", "HPF", ui::violet, T ("Coupe-bas des voix doublées.")),
+      dblLpf (p.apvts, "dblLpf", "LPF", ui::violet, T ("Coupe-haut des voix doublées.")),
+      // ---- EFFECTS
+      drive (p.apvts, "drive", "DRIVE", ui::pink, T ("Saturation à lampe, anti-repliement.")),
+      lowCut (p.apvts, "lowCut", "LOW CUT", ui::pink, T ("Coupe-bas de sortie.")),
+      highCut (p.apvts, "highCut", "HIGH CUT", ui::pink, T ("Coupe-haut de sortie.")),
+      comp (p.apvts, "comp", "COMP", ui::pink, T ("Compresseur un bouton : resserre et densifie le robot.")),
+      ensemble (p.apvts, "ensemble", "ENSEMBLE", ui::cyan, T ("Chorus des string machines : le son vocoder des années 80.")),
+      ensRate (p.apvts, "ensRate", "ENS RATE", ui::cyan, T ("Vitesse de l'ensemble.")),
+      phaser (p.apvts, "phaser", "PHASER", ui::cyan, T ("Phaser 6 étages stéréo.")),
+      phRate (p.apvts, "phRate", "PH RATE", ui::cyan, T ("Vitesse du phaser.")),
+      phDepth (p.apvts, "phDepth", "PH DEPTH", ui::cyan, T ("Profondeur du phaser.")),
+      delayMix (p.apvts, "delayMix", "MIX", ui::violet, T ("Délai calé sur le BPM.")),
+      delayFb (p.apvts, "delayFb", "FEEDBACK", ui::violet, T ("Répétitions du délai.")),
+      delayTone (p.apvts, "delayTone", "TONE", ui::violet, T ("Couleur des répétitions (plus sombre à gauche).")),
+      reverb (p.apvts, "reverb", "MIX", ui::green, T ("Réverbération.")),
+      revSize (p.apvts, "revSize", "SIZE", ui::green, T ("Taille de la pièce.")),
+      revPre (p.apvts, "revPre", "PRE-DELAY", ui::green, T ("Pré-délai : sépare la voix de la réverbe.")),
+      revDamp (p.apvts, "revDamp", "DAMP", ui::green, T ("Amortissement des aigus de la réverbe.")),
+      revWidth (p.apvts, "revWidth", "WIDTH", ui::green, T ("Largeur stéréo de la réverbe.")),
+      delayTime (p.apvts, "delayTime", T ("Division du délai, calée sur le BPM.")),
+      pingPong (p.apvts, "pingPong", "PING-PONG", ui::violet, T ("Répétitions alternées gauche / droite.")),
+      // ---- OUTPUT
+      source (p.apvts, "source", ui::cyan, T ("Ce qui joue les notes du robot. MIDI : clavier ou fichier .mid (sans note, vck suit ta voix tout seul). AUTO : suit ta voix. SIDECHAIN : un synthé externe."),
+              juce::StringArray { "MIDI", "AUTO", "SIDECHAIN" }),
+      robot (p.apvts, "robot", "ROBOT", ui::red, T ("Niveau du robot (vocoder).")),
+      voice (p.apvts, "voice", "VOIX", ui::red, T ("Ta voix d'origine sous le robot (doublée si le doubleur est actif).")),
+      width (p.apvts, "width", "WIDTH", ui::red, T ("Largeur stéréo globale.")),
+      output (p.apvts, "output", "OUTPUT", ui::red, T ("Volume de sortie (limiteur transparent intégré).")),
+      // ---- MIDI
       roll (p),
-      clipOn (p.apvts, "clipOn", "PLAY", ui::pink, tips::t ("Joue le clip MIDI importé.")),
-      loop (p.apvts, "loop", "LOOP", ui::pink, tips::t ("Boucle le clip MIDI.")),
-      sync (p.apvts, "sync", ui::pink, tips::t ("HOST : le clip suit la lecture et le BPM du DAW. FREE : il tourne en boucle au BPM réglé à côté.")),
-      rate (p.apvts, "rate", ui::pink, tips::t ("Vitesse du clip : moitié, normale, double.")),
-      bpm (p.apvts, "bpm", tips::t ("BPM utilisé en mode FREE (ou sans DAW). Glisse pour changer, double-clic = 120.")),
-      transpose (p.apvts, "transpose", tips::t ("Transposition du clip MIDI en demi-tons.")),
-      dblVoices (p.apvts, "dblVoices", ui::violet, tips::t ("Doubleur façon Waves Doubler : 2 ou 4 voix décalées, désaccordées et placées dans l'espace.")),
-      dblDetune (p.apvts, "dblDetune", "DETUNE", ui::violet, tips::t ("Désaccord des voix doublées (cents).")),
-      dblDelay (p.apvts, "dblDelay", "DELAY", ui::violet, tips::t ("Retard des voix doublées : court = serré, long = deux chanteurs.")),
-      dblWidth (p.apvts, "dblWidth", "WIDTH", ui::violet, tips::t ("Largeur stéréo des voix doublées.")),
-      dblDrift (p.apvts, "dblDrift", "DRIFT", ui::violet, tips::t ("Dérive naturelle de la hauteur et du placement, comme un vrai double.")),
-      dblMix (p.apvts, "dblMix", "MIX", ui::violet, tips::t ("Niveau des voix doublées.")),
-      ensemble (p.apvts, "ensemble", "ENSEMBLE", ui::cyan, tips::t ("Chorus à trois phases des string machines : le son vocoder des années 80.")),
-      delayMix (p.apvts, "delayMix", "DELAY", ui::cyan, tips::t ("Délai ping-pong calé sur le tempo.")),
-      delayFb (p.apvts, "delayFb", "FEEDBACK", ui::cyan, tips::t ("Répétitions du délai.")),
-      reverb (p.apvts, "reverb", "REVERB", ui::cyan, tips::t ("Réverbération.")),
-      revSize (p.apvts, "revSize", "SIZE", ui::cyan, tips::t ("Taille de la pièce.")),
-      delayTime (p.apvts, "delayTime", tips::t ("Division du délai, calée sur le BPM.")),
-      robot (p.apvts, "robot", "ROBOT", ui::red, tips::t ("Niveau du robot (vocoder).")),
-      voice (p.apvts, "voice", "VOIX", ui::red, tips::t ("Ta voix d'origine, mélangée sous le robot (et doublée si le doubleur est actif).")),
-      output (p.apvts, "output", "OUTPUT", ui::red, tips::t ("Volume de sortie (limiteur doux intégré, jamais de saturation).")),
-      bypass (p.apvts, "bypass", "BYPASS", ui::red, tips::t ("Écoute le son d'origine.")),
-      voiceView (p)
+      clipOn (p.apvts, "clipOn", "PLAY", ui::pink, T ("Joue le clip MIDI importé.")),
+      loop (p.apvts, "loop", "LOOP", ui::pink, T ("Boucle le clip MIDI.")),
+      sync (p.apvts, "sync", ui::pink, T ("HOST : suit la lecture et le BPM du DAW. FREE : tourne au BPM réglé.")),
+      rate (p.apvts, "rate", ui::pink, T ("Vitesse du clip : moitié, normale, double.")),
+      bpm (p.apvts, "bpm", T ("BPM en mode FREE (ou sans DAW). Glisse pour changer, double-clic = 120.")),
+      transpose (p.apvts, "transpose", T ("Transposition du clip MIDI en demi-tons.")),
+      voiceView (p),
+      noLatency (p.apvts, "noLatency", "NO LATENCY", ui::cyan, T ("Coupé : mode HQ (17 ms compensés par le DAW) — la hauteur est détectée en avance et le limiteur anticipe. Allumé : zéro latence pour chanter en direct.")),
+      bypass (p.apvts, "bypass", "BYPASS", ui::red, T ("Écoute le son d'origine (aligné sur la latence).")),
+      browser (p)
 {
     setLookAndFeel (&lnf);
     ravenImg = juce::ImageCache::getFromMemory (BinaryData::raven_png, BinaryData::raven_pngSize);
     coverImg = juce::ImageCache::getFromMemory (BinaryData::cover_jpg, BinaryData::cover_jpgSize);
 
-    key.setColumns (6);
+    key.setColumns (12);
     dblVoices.setColumns (1);
-    importBtn.setButtonText ("IMPORT MIDI");
-    clearBtn.setButtonText ("CLEAR");
-    importBtn.setColour (juce::TextButton::buttonOnColourId, ui::pink);
-    clearBtn.setColour (juce::TextButton::buttonOnColourId, ui::pink);
-    importBtn.setTooltip (u8 ("Charge un fichier .mid : la mélodie / les accords joueront le robot, calés sur le tempo."));
-    clearBtn.setTooltip (u8 ("Retire le clip MIDI."));
-    importBtn.onClick = [this] { importMidi(); };
-    clearBtn.onClick = [this] { proc.clearMidi(); };
+    source.setColumns (1);
 
-    for (juce::Component* c : std::initializer_list<juce::Component*> {
-             &bands, &formant, &sharp, &bright, &gate, &attack, &release, &sibil, &freeze,
-             &source, &wave, &mode, &octave, &unison, &detune, &glide, &vibrato, &noise, &envA, &envR,
-             &key, &harmony, &scale, &retune,
-             &roll, &importBtn, &clearBtn, &clipOn, &loop, &sync, &rate, &bpm, &transpose,
-             &dblVoices, &dblDetune, &dblDelay, &dblWidth, &dblDrift, &dblMix,
-             &ensemble, &delayMix, &delayFb, &reverb, &revSize, &delayTime,
-             &robot, &voice, &output, &bypass, &voiceView,
-             &presetBox, &prevBtn, &nextBtn, &saveBtn })
+    // 4 voix du doubleur : retard, desaccord, panoramique, gain
+    for (int i = 0; i < 4; ++i)
+    {
+        const juce::String n (i + 1);
+        dblVoiceKnobs.add (new NeonKnob (p.apvts, "dblDelay" + n, "DELAY", ui::violet, T ("Retard de cette voix.")));
+        dblVoiceKnobs.add (new NeonKnob (p.apvts, "dblDetune" + n, "DETUNE", ui::cyan, T ("Désaccord de cette voix (cents, + ou -).")));
+        dblVoiceKnobs.add (new NeonKnob (p.apvts, "dblPan" + n, "PAN", ui::pink, T ("Placement de cette voix.")));
+        dblVoiceKnobs.add (new NeonKnob (p.apvts, "dblGain" + n, "GAIN", ui::red, T ("Niveau de cette voix.")));
+    }
+
+    // ---- placement par page (-1 = toujours visible)
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &bands, &loFreq, &hiFreq, &sharp, &spread, &inGain, &gate, &attack, &release,
+                                                                         &formant, &bright, &character, &sibil, &breath, &freeze, &bankView })
+        place (*c, pgVocoder);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &wave, &mode, &octave, &unison, &detune, &sub, &noise, &glide, &vibrato,
+                                                                         &vibRate, &velSens, &envA, &envR, &bendRange })
+        place (*c, pgCarrier);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &key, &voiceRange, &harmony, &scale, &drone, &retune, &humanize, &tracking,
+                                                                         &hold, &harmLevel, &autoTrans, &pitchGraph })
+        place (*c, pgAuto);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &dblVoices, &dblMix, &dblDirect, &dblWidth, &dblDetune, &dblDelay, &dblDrift,
+                                                                         &dblRate, &dblHpf, &dblLpf })
+        place (*c, pgDoubler);
+    for (auto* k : dblVoiceKnobs) place (*k, pgDoubler);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &drive, &lowCut, &highCut, &comp, &ensemble, &ensRate, &phaser, &phRate, &phDepth,
+                                                                         &delayMix, &delayFb, &delayTone, &delayTime, &pingPong, &reverb, &revSize,
+                                                                         &revPre, &revDamp, &revWidth })
+        place (*c, pgEffects);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &source, &robot, &voice, &width, &output, &roll, &importMidiBtn, &clearMidiBtn,
+                                                                         &clipOn, &loop, &sync, &rate, &bpm, &transpose, &voiceView,
+                                                                         &noLatency, &bypass, &undoBtn, &redoBtn, &resetBtn, &prevBtn, &nextBtn,
+                                                                         &saveBtn, &folderBtn, &importBtn, &copyBtn, &presetNameBtn })
         addAndMakeVisible (c);
 
-    autoPanelComps[0] = &key; autoPanelComps[1] = &harmony; autoPanelComps[2] = &scale; autoPanelComps[3] = &retune; autoPanelComps[4] = nullptr;
-    juce::Component* mc[] = { &roll, &importBtn, &clearBtn, &clipOn, &loop, &sync, &rate, &bpm, &transpose };
-    for (int i = 0; i < 9; ++i) midiPanelComps[i] = mc[i];
+    // ---- MIDI
+    importMidiBtn.setButtonText ("IMPORT MIDI");
+    clearMidiBtn.setButtonText ("CLEAR");
+    for (auto* b : { &importMidiBtn, &clearMidiBtn }) b->setColour (juce::TextButton::buttonOnColourId, ui::pink);
+    importMidiBtn.setTooltip (T ("Charge un fichier .mid : la mélodie / les accords joueront le robot, calés sur le tempo."));
+    clearMidiBtn.setTooltip (T ("Retire le clip MIDI."));
+    importMidiBtn.onClick = [this] { importMidi(); };
+    clearMidiBtn.onClick = [this] { proc.clearMidi(); };
 
-    presetBox.setTextWhenNothingSelected ("Init");
-    presetBox.setJustificationType (juce::Justification::centred);
-    presetBox.setTooltip (u8 ("Presets calés sur des sons célèbres (Daft Punk, Kraftwerk, Imogen Heap...), doubleurs et créatifs."));
-    presetBox.onChange = [this] { if (presetBox.getSelectedId() > 0) loadPresetById (presetBox.getSelectedId()); };
-    prevBtn.setTooltip (u8 ("Preset précédent"));
-    nextBtn.setTooltip (u8 ("Preset suivant"));
-    saveBtn.setTooltip (u8 ("Sauve tes réglages comme preset (Documents/vck/Presets)."));
-    auto step = [this] (int dir)
-    {
-        const int n = presetBox.getNumItems();
-        if (n == 0) return;
-        int idx = presetBox.getSelectedItemIndex();
-        idx = (idx < 0 ? 0 : (idx + dir + n) % n);
-        presetBox.setSelectedItemIndex (idx, juce::sendNotification);
-    };
-    prevBtn.onClick = [step] { step (-1); };
-    nextBtn.onClick = [step] { step (1); };
+    // ---- en-tete (comme ravenn)
+    undoBtn.setButtonText ("UNDO");
+    undoBtn.setTooltip (T ("Annuler (undo)"));
+    undoBtn.onClick = [this] { proc.undo.undo(); };
+    redoBtn.setButtonText ("REDO");
+    redoBtn.setTooltip (T ("Rétablir (redo)"));
+    redoBtn.onClick = [this] { proc.undo.redo(); };
+    resetBtn.setButtonText ("RESET");
+    resetBtn.setTooltip (T ("Remet tous les paramètres par défaut (la gamme reste). Annulable avec UNDO, refaisable avec REDO."));
+    resetBtn.onClick = [this] { proc.resetAllParameters(); };
+    prevBtn.onClick = [this] { proc.presets.previous(); };
+    nextBtn.onClick = [this] { proc.presets.next(); };
     saveBtn.onClick = [this] { savePreset(); };
-    rebuildPresetBox();
+    folderBtn.setButtonText ("DOSSIER");
+    folderBtn.setTooltip (T ("Ouvre le dossier des presets (Documents/vck/Presets)"));
+    folderBtn.onClick = [this] { proc.presets.openFolder(); };
+    importBtn.setButtonText ("IMPORT");
+    importBtn.setTooltip (T ("Importe des fichiers .preset (copiés dans ton dossier de presets)"));
+    importBtn.onClick = [this] { importPresets(); };
+    presetNameBtn.setTooltip (T ("Ouvre la page des presets"));
+    presetNameBtn.onClick = [this] { showBrowser (! browser.isVisible()); };
+    for (int i = 0; i < 4; ++i)
+    {
+        auto* b = slotBtns.add (new juce::TextButton (juce::String::charToString ((juce::juce_wchar) ('A' + i))));
+        b->setColour (juce::TextButton::buttonOnColourId, ui::cyan);
+        b->setTooltip (T ("Slots de comparaison A / B / C / D : chaque slot garde ses propres réglages."));
+        b->onClick = [this, i] { proc.selectSlot (i); };
+        addAndMakeVisible (b);
+    }
+    copyBtn.setButtonText (T ("→"));
+    copyBtn.setTooltip (T ("Copie les réglages actuels dans un autre slot"));
+    copyBtn.onClick = [this]
+    {
+        const int cur = proc.getABSlot();
+        juce::PopupMenu m;
+        m.addSectionHeader (T ("Copier ") + juce::String::charToString ((juce::juce_wchar) ('A' + cur)) + T (" vers…"));
+        for (int i = 0; i < 4; ++i)
+            if (i != cur) m.addItem (i + 1, juce::String::charToString ((juce::juce_wchar) ('A' + i)) + (proc.slotHasState (i) ? T ("  (remplace)") : juce::String()));
+        m.addSeparator();
+        m.addItem (10, T ("Tous les autres slots"));
+        juce::Component::SafePointer<VckEditor> safe (this);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&copyBtn), [safe, cur] (int r)
+        {
+            if (safe == nullptr || r == 0) return;
+            if (r == 10) { for (int i = 0; i < 4; ++i) if (i != cur) safe->proc.copySlotTo (i); }
+            else safe->proc.copySlotTo (r - 1);
+        });
+    };
+
+    // ---- onglets
+    const char* tabNames[numPages] = { "VOCODER", "CARRIER", "AUTO", "DOUBLER", "EFFECTS" };
+    for (int i = 0; i < numPages; ++i)
+    {
+        auto* t = tabs.add (new juce::TextButton (tabNames[i]));
+        t->getProperties().set ("tab", true);
+        t->setColour (juce::TextButton::buttonOnColourId, ui::violet);
+        t->onClick = [this, i] { setPage (i); };
+        addAndMakeVisible (t);
+    }
+
+    // ---- page des presets
+    addChildComponent (browser);
+    browser.onClose = [this] { browser.setVisible (false); };
+    browser.onSave = [this] { savePreset(); };
+    browser.onImport = [this] { importPresets(); };
+    browser.onExport = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> (T ("Exporter le preset"),
+                      juce::File::getSpecialLocation (juce::File::userDesktopDirectory).getChildFile (proc.presets.getCurrent() + ".preset"), "*.preset");
+        juce::Component::SafePointer<VckEditor> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [safe] (const juce::FileChooser& fc)
+        {
+            if (safe == nullptr) return;
+            auto f = fc.getResult();
+            if (f == juce::File()) return;
+            if (auto xml = safe->proc.apvts.copyState().createXml()) xml->writeTo (f.withFileExtension (".preset"));
+        });
+    };
 
     setResizable (true, true);
     if (auto* c = getConstrainer())
@@ -775,100 +248,103 @@ VckEditor::VckEditor (VckProcessor& p)
         c->setSizeLimits ((int) (baseW * 0.6f), (int) (baseH * 0.6f), (int) (baseW * 1.6f), (int) (baseH * 1.6f));
     }
     setSize ((int) (baseW * 0.88f), (int) (baseH * 0.88f));
+    setPage (pgVocoder);
+    refreshPresets();
     startTimerHz (15);
 }
 
 VckEditor::~VckEditor() { setLookAndFeel (nullptr); }
 
-void VckEditor::rebuildPresetBox()
+void VckEditor::place (juce::Component& c, int pg)
 {
-    presetBox.clear (juce::dontSendNotification);
-    auto& list = PresetManager::factory();
-    for (auto& cat : PresetManager::categories())
-    {
-        presetBox.addSectionHeading (cat);
-        for (int i = 0; i < (int) list.size(); ++i)
-            if (cat == list[(size_t) i].category) presetBox.addItem (list[(size_t) i].name, i + 1);
-    }
-    auto users = proc.presets.userNames();
-    if (! users.isEmpty())
-    {
-        presetBox.addSectionHeading ("MES PRESETS");
-        for (int j = 0; j < users.size(); ++j) presetBox.addItem (users[j], 1000 + j);
-    }
-    shownPreset = {};
+    pageOf.push_back ({ &c, pg });
+    addChildComponent (c);
 }
 
-void VckEditor::loadPresetById (int id)
+void VckEditor::setPage (int pg)
 {
-    if (id >= 1000)
-    {
-        auto users = proc.presets.userNames();
-        if (id - 1000 < users.size()) proc.presets.loadUser (users[id - 1000]);
-    }
-    else proc.presets.loadFactory (id - 1);
-    shownPreset = {};
+    page = pg;
+    for (auto& [c, p] : pageOf) c->setVisible (p == page);
+    for (int i = 0; i < tabs.size(); ++i) tabs[i]->setToggleState (i == page, juce::dontSendNotification);
+    shownVoices = -1;
+    browser.toFront (false);
     repaint();
+}
+
+void VckEditor::refreshPresets()
+{
+    shownPreset = proc.presets.getCurrent();
+    presetNameBtn.setButtonText (shownPreset + T ("  ▾"));
+    browser.refresh();
 }
 
 void VckEditor::savePreset()
 {
-    saveDialog = std::make_unique<juce::AlertWindow> ("SAVE PRESET", u8 ("Nom du preset :"), juce::MessageBoxIconType::NoIcon, this);
-    saveDialog->setLookAndFeel (&lnf);
-    saveDialog->addTextEditor ("name", proc.presets.currentName);
-    saveDialog->addButton ("SAVE", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    saveDialog->addButton ("ANNULER", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    saveDialog->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int r)
+    auto* w = new juce::AlertWindow (T ("Sauvegarder le preset"), T ("Nom du preset :"), juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("name", proc.presets.isFactory (proc.presets.getCurrent()) ? juce::String() : proc.presets.getCurrent());
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Annuler", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<VckEditor> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int result)
     {
-        if (r == 1 && saveDialog != nullptr)
-        {
-            const auto name = saveDialog->getTextEditorContents ("name");
-            if (proc.presets.saveUser (name)) { rebuildPresetBox(); showMessage (u8 ("Preset sauvé : ") + name); }
-            else showMessage (u8 ("Impossible de sauver ce preset"));
-        }
-        saveDialog.reset();
-    }), false);
+        if (result != 1 || safe == nullptr) return;
+        if (safe->proc.presets.save (w->getTextEditorContents ("name"))) { safe->refreshPresets(); safe->showMessage (T ("Preset sauvé")); }
+        else safe->showMessage (T ("Nom invalide (ou nom d'un preset d'usine)"));
+    }), true);
+}
+
+void VckEditor::importPresets()
+{
+    chooser = std::make_unique<juce::FileChooser> (T ("Importer des presets vck"), juce::File::getSpecialLocation (juce::File::userHomeDirectory), "*.preset");
+    juce::Component::SafePointer<VckEditor> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+                          [safe] (const juce::FileChooser& fc)
+    {
+        if (safe == nullptr) return;
+        const int n = safe->proc.presets.importFiles (fc.getResults());
+        if (n > 0) { safe->refreshPresets(); safe->showMessage (juce::String (n) + T (" preset(s) importé(s)")); }
+    });
 }
 
 void VckEditor::importMidi()
 {
-    chooser = std::make_unique<juce::FileChooser> (u8 ("Choisis un fichier MIDI"), juce::File(), "*.mid;*.midi");
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc)
+    chooser = std::make_unique<juce::FileChooser> (T ("Choisis un fichier MIDI"), juce::File(), "*.mid;*.midi");
+    juce::Component::SafePointer<VckEditor> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [safe] (const juce::FileChooser& fc)
     {
+        if (safe == nullptr) return;
         auto f = fc.getResult();
-        if (f.existsAsFile()) filesDropped ({ f.getFullPathName() }, 0, 0);
+        if (f.existsAsFile()) safe->filesDropped ({ f.getFullPathName() }, 0, 0);
     });
 }
 
 bool VckEditor::isInterestedInFileDrag (const juce::StringArray& files)
 {
-    for (auto& f : files) if (f.endsWithIgnoreCase (".mid") || f.endsWithIgnoreCase (".midi")) return true;
+    for (auto& f : files) if (f.endsWithIgnoreCase (".mid") || f.endsWithIgnoreCase (".midi") || f.endsWithIgnoreCase (".preset")) return true;
     return false;
 }
 
 void VckEditor::filesDropped (const juce::StringArray& files, int, int)
 {
     roll.dropHover = dragHover = false;
+    juce::Array<juce::File> presetFiles;
     for (auto& path : files)
     {
+        if (path.endsWithIgnoreCase (".preset")) { presetFiles.add (juce::File (path)); continue; }
         if (! (path.endsWithIgnoreCase (".mid") || path.endsWithIgnoreCase (".midi"))) continue;
         juce::String err;
         if (proc.loadMidi (juce::File (path), err))
         {
-            // importer un MIDI = vouloir l'entendre : source MIDI + lecture
-            for (auto [id, v] : std::initializer_list<std::pair<const char*, float>> { { "source", 0.f }, { "clipOn", 1.f } })
-                if (auto* prm = proc.apvts.getParameter (id))
-                {
-                    prm->beginChangeGesture();
-                    prm->setValueNotifyingHost (prm->convertTo0to1 (v));
-                    prm->endChangeGesture();
-                }
-            showMessage (u8 ("MIDI chargé : ") + juce::File (path).getFileNameWithoutExtension() + u8 ("  -  calé sur le tempo"));
+            // importer un MIDI = vouloir l'entendre : source MIDI + lecture (une etape d'undo)
+            proc.undo.beginNewTransaction ("MIDI");
+            proc.presets.setTreeValue ("source", 0.f, &proc.undo);
+            proc.presets.setTreeValue ("clipOn", 1.f, &proc.undo);
+            proc.undo.beginNewTransaction();
+            showMessage (T ("MIDI chargé : ") + juce::File (path).getFileNameWithoutExtension() + T ("  -  calé sur le tempo"));
         }
         else showMessage (err);
-        break;
     }
+    if (! presetFiles.isEmpty() && proc.presets.importFiles (presetFiles) > 0) { refreshPresets(); showMessage (T ("Preset(s) importé(s)")); }
     repaint();
 }
 
@@ -876,37 +352,41 @@ void VckEditor::showMessage (const juce::String& m) { message = m; messageTicks 
 
 void VckEditor::timerCallback()
 {
-    auto& pm = proc.presets;
-    if (pm.currentName != shownPreset)
+    if (proc.presets.getCurrent() != shownPreset)
     {
-        shownPreset = pm.currentName;
-        int id = 0;
-        if (pm.currentFactory >= 0) id = pm.currentFactory + 1;
-        else
-        {
-            auto users = pm.userNames();
-            const int j = users.indexOf (pm.currentName);
-            if (j >= 0) id = 1000 + j;
-        }
-        if (id > 0) presetBox.setSelectedId (id, juce::dontSendNotification);
-        else presetBox.setText (pm.currentName, juce::dontSendNotification);
+        shownPreset = proc.presets.getCurrent();
+        presetNameBtn.setButtonText (shownPreset + T ("  ▾"));
+        browser.syncSelection();
         repaint (infoArea);
     }
-    const int src = (int) proc.apvts.getRawParameterValue ("source")->load();
-    if (src != shownSource)
+    const int slot = proc.getABSlot();
+    for (int i = 0; i < slotBtns.size(); ++i)
     {
-        shownSource = src;
-        for (auto* c : autoPanelComps) if (c != nullptr) c->setAlpha (src == 1 ? 1.f : 0.38f);
-        for (auto* c : midiPanelComps) if (c != nullptr) c->setAlpha (src == 0 ? 1.f : 0.38f);
-        for (juce::Component* c : { (juce::Component*) &wave, (juce::Component*) &mode, (juce::Component*) &octave, (juce::Component*) &unison,
-                                    (juce::Component*) &detune, (juce::Component*) &glide, (juce::Component*) &vibrato, (juce::Component*) &noise,
-                                    (juce::Component*) &envA, (juce::Component*) &envR })
-            c->setAlpha (src == 2 ? 0.38f : 1.f);
-        repaint();
+        slotBtns[i]->setToggleState (i == slot, juce::dontSendNotification);
+        slotBtns[i]->setAlpha (proc.slotHasState (i) ? 1.f : 0.5f);
+    }
+    // une etape d'undo par geste (rien tant que la souris est enfoncee)
+    if (! juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown()) proc.undo.beginNewTransaction();
+    undoBtn.setEnabled (proc.undo.canUndo());
+    redoBtn.setEnabled (proc.undo.canRedo());
+
+    // doubleur : voix 3 et 4 estompees en mode 2 voix
+    const int dv = (int) proc.apvts.getRawParameterValue ("dblVoices")->load();
+    if (dv != shownVoices)
+    {
+        shownVoices = dv;
+        for (int i = 0; i < dblVoiceKnobs.size(); ++i)
+        {
+            const int voiceIdx = i / 4;
+            const bool on = dv == 2 || (dv == 1 && voiceIdx < 2);
+            dblVoiceKnobs[i]->setAlpha (on ? 1.f : 0.35f);
+        }
+        if (page == pgDoubler) repaint (dblColsArea);
     }
     if (messageTicks > 0 && --messageTicks == 0) repaint (msgArea);
-    repaint (autoInfoArea);
+    repaint (statusArea);
     repaint (midiInfoArea);
+    if (page == pgAuto) repaint (autoInfoArea);
 }
 
 void VckEditor::buildBackground (float pxScale)
@@ -915,6 +395,7 @@ void VckEditor::buildBackground (float pxScale)
     const int w = jmax (1, getWidth()), h = jmax (1, getHeight());
     background = Image (Image::ARGB, jmax (1, roundToInt (w * pxScale)), jmax (1, roundToInt (h * pxScale)), true);
     bgScale = pxScale;
+    bgPage = page;
     Graphics g (background);
     g.addTransform (AffineTransform::scale (pxScale));
     g.fillAll (ui::bg);
@@ -928,8 +409,7 @@ void VckEditor::buildBackground (float pxScale)
     }
     g.setColour (Colour (0xff04122a).withAlpha (0.30f));
     g.fillAll();
-    g.setGradientFill (ColourGradient (Colours::transparentBlack, (float) w * 0.5f, (float) h * 0.4f,
-                                       Colours::black.withAlpha (0.65f), 0.f, (float) h, true));
+    g.setGradientFill (ColourGradient (Colours::transparentBlack, (float) w * 0.5f, (float) h * 0.4f, Colours::black.withAlpha (0.65f), 0.f, (float) h, true));
     g.fillAll();
     for (int y = 0; y < h; y += 3) { g.setColour (Colours::black.withAlpha (0.08f)); g.fillRect (0, y, w, 1); }
     Random rng (1337);
@@ -947,6 +427,7 @@ void VckEditor::buildBackground (float pxScale)
     }
     for (auto& pnl : panels)
     {
+        if (pnl.page != -1 && pnl.page != page) continue;
         drawPanelFrame (g, pnl.area.toFloat(), pnl.colour, s);
         drawPanelTitle (g, pnl.area.toFloat(), pnl.title, pnl.colour, s);
     }
@@ -957,12 +438,11 @@ void VckEditor::paint (juce::Graphics& g)
     using namespace juce;
     const float s = (float) getWidth() / baseW;
     const float pxs = jlimit (1.f, 4.f, g.getInternalContext().getPhysicalPixelScaleFactor());
-    if (background.isNull() || bgScale != pxs
+    if (background.isNull() || bgPage != page || bgScale != pxs
         || background.getWidth() != roundToInt (getWidth() * pxs) || background.getHeight() != roundToInt (getHeight() * pxs))
         buildBackground (pxs);
     g.drawImage (background, getLocalBounds().toFloat());
 
-    // en-tete
     auto hb = header.toFloat();
     g.setGradientFill (ColourGradient (Colours::black.withAlpha (0.88f), 0, hb.getY(), Colours::black.withAlpha (0.55f), 0, hb.getBottom(), false));
     g.fillRect (hb);
@@ -977,8 +457,7 @@ void VckEditor::paint (juce::Graphics& g)
         const float rw = rh * (float) ravenImg.getWidth() / (float) ravenImg.getHeight();
         const float px = jmax (1.f, g.getInternalContext().getPhysicalPixelScaleFactor());
         const int tw = jmax (1, roundToInt (rw * px)), th = jmax (1, roundToInt (rh * px));
-        auto box = Rectangle<float> (std::round (la.getX() * px) / px, std::round ((la.getCentreY() - rh * 0.5f) * px) / px,
-                                     (float) tw / px, (float) th / px);
+        auto box = Rectangle<float> (std::round (la.getX() * px) / px, std::round ((la.getCentreY() - rh * 0.5f) * px) / px, (float) tw / px, (float) th / px);
         if (ravenCrisp.getWidth() != tw || ravenCrisp.getHeight() != th)
         {
             Image src = ravenImg.convertedToFormat (Image::ARGB);
@@ -988,10 +467,7 @@ void VckEditor::paint (juce::Graphics& g)
             Image::BitmapData bd (ravenCrisp, Image::BitmapData::readWrite);
             for (int y = 0; y < th; ++y)
                 for (int x = 0; x < tw; ++x)
-                {
-                    const float a = bd.getPixelColour (x, y).getFloatAlpha();
-                    bd.setPixelColour (x, y, Colours::white.withAlpha (jlimit (0.f, 1.f, (a - 0.12f) * 2.4f)));
-                }
+                    bd.setPixelColour (x, y, Colours::white.withAlpha (jlimit (0.f, 1.f, (bd.getPixelColour (x, y).getFloatAlpha() - 0.12f) * 2.4f)));
         }
         g.drawImageTransformed (ravenCrisp, AffineTransform::scale (1.f / px).translated (box.getX(), box.getY()));
         la.removeFromLeft (rw + 6.f * s);
@@ -1004,54 +480,94 @@ void VckEditor::paint (juce::Graphics& g)
     g.setFont (ui::font (8.f * s, true, 0.5f));
     g.drawText (String ("VOCODER  ") + JucePlugin_VersionString, la.withTrimmedLeft (2.f * s), Justification::topLeft);
 
-    // description du preset
+    // description du preset (a cote des onglets)
     g.setColour (ui::dim);
     g.setFont (ui::font (10.5f * s));
-    g.drawFittedText (proc.presets.currentInfo, infoArea, Justification::centredLeft, 3, 0.9f);
+    g.drawFittedText (proc.presets.getInfo (proc.presets.getCurrent()), infoArea, Justification::centredLeft, 2, 0.9f);
 
-    // etiquettes des selecteurs
     auto tag = [&] (Component& c, const String& t)
     {
+        if (! c.isVisible()) return;
         auto r = c.getBounds().toFloat().translated (0, -14.f * s).withHeight (13.f * s);
         g.setColour (ui::dim);
         g.setFont (ui::font (9.f * s, true, 0.3f));
         g.drawText (t, r, Justification::centred);
     };
-    tag (bands, "BANDS");
-    tag (source, "SOURCE");
-    tag (wave, "WAVE");
-    tag (mode, "MODE");
-    tag (octave, "OCTAVE");
-    tag (key, "KEY");
-    tag (scale, "SCALE");
-    tag (harmony, "HARMONY");
-    tag (sync, "SYNC");
-    tag (rate, "RATE");
-    tag (bpm, "BPM");
-    tag (transpose, "TRANSPOSE");
+    tag (bands, "BANDS"); tag (wave, "WAVE"); tag (mode, "MODE"); tag (octave, "OCTAVE");
+    tag (key, "KEY"); tag (scale, "SCALE"); tag (voiceRange, "VOIX"); tag (harmony, "HARMONY");
+    tag (sync, "SYNC"); tag (rate, "RATE"); tag (bpm, "BPM"); tag (transpose, "TRANSPOSE");
+    tag (source, "SOURCE"); tag (delayTime, "TIME");
 
-    // infos dynamiques : tempo
+    // doubleur : titres des colonnes de voix
+    if (page == pgDoubler)
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            auto r = dblColsArea.toFloat();
+            const float cw = r.getWidth() / 4.f;
+            auto c = Rectangle<float> (r.getX() + cw * (float) i, r.getY(), cw, 16.f * s);
+            const bool on = shownVoices == 2 || (shownVoices == 1 && i < 2);
+            g.setColour (on ? ui::text : ui::dim.withAlpha (0.5f));
+            g.setFont (ui::font (10.f * s, true, 0.3f));
+            g.drawText ("VOIX " + String (i + 1), c, Justification::centred);
+            if (i > 0)
+            {
+                g.setColour (ui::edge.withAlpha (0.6f));
+                g.fillRect (Rectangle<float> (c.getX(), r.getY() + 4.f * s, 1.f, r.getHeight() - 8.f * s));
+            }
+        }
+    }
+    if (page == pgCarrier)
+    {
+        g.setColour (ui::dim);
+        g.setFont (ui::font (11.f * s));
+        g.drawFittedText (T ("SOURCE (colonne de droite) :\n"
+                             "- MIDI : joue des notes ou glisse un .mid. Sans note pendant un instant, vck suit ta voix tout seul : jamais de silence.\n"
+                             "- AUTO : la porteuse suit ta voix, calée dans la gamme (onglet AUTO).\n"
+                             "- SIDECHAIN : un synthé externe envoyé dans l'entrée sidechain de vck.\n\n"
+                             "Le synthé de cet onglet est la porteuse en MIDI et en AUTO."),
+                          carrierInfoArea, Justification::topLeft, 12, 0.9f);
+    }
+    if (page == pgAuto)
+    {
+        auto a = autoInfoArea.toFloat();
+        const float hz = proc.uiPitchHz.load(), tn = proc.uiTargetNote.load();
+        const bool on = proc.uiAutoActive.load();
+        g.setColour (Colours::black.withAlpha (0.35f));
+        g.fillRoundedRectangle (a, 3.f);
+        g.setColour ((hz > 0.f && on) ? ui::green : ui::dim.withAlpha (0.6f));
+        g.setFont (ui::font (28.f * s, true, 0.05f));
+        g.drawText (on && tn >= 0.f ? noteName (tn) : String ("--"), a.withTrimmedBottom (a.getHeight() * 0.38f), Justification::centred);
+        g.setFont (ui::font (9.5f * s, true, 0.15f));
+        g.setColour (ui::dim);
+        g.drawText (on ? (hz > 0.f ? "VOIX " + String (hz, 0) + " Hz" : T ("EN ÉCOUTE")) : T ("AUTO EN PAUSE (MIDI JOUE)"),
+                    a.withTrimmedTop (a.getHeight() * 0.62f), Justification::centredTop);
+    }
+
+    // colonne de sortie : etat
+    {
+        auto a = statusArea.toFloat();
+        g.setFont (ui::font (9.5f * s, true, 0.12f));
+        const bool nl = proc.apvts.getRawParameterValue ("noLatency")->load() > 0.5f;
+        const bool autoOn = proc.uiAutoActive.load();
+        const int src = (int) proc.apvts.getRawParameterValue ("source")->load();
+        String l1 = src == 2 ? String ("SIDECHAIN") : (autoOn ? (src == 0 ? T ("MIDI > AUTO (pas de note)") : String ("AUTO : SUIT LA VOIX")) : String ("MIDI : NOTES"));
+        String l2 = nl ? String ("NO LATENCY : 0 ms") : "HQ : " + String (proc.uiLatencyMs.load(), 1) + " ms";
+        String l3 = "LIMITEUR " + String (proc.uiLimGr.load(), 1) + " dB";
+        g.setColour (autoOn ? ui::green : ui::text);
+        g.drawText (l1, a.removeFromTop (a.getHeight() / 3.f), Justification::centred);
+        g.setColour (ui::dim);
+        g.drawText (l2, a.removeFromTop (a.getHeight() / 2.f), Justification::centred);
+        g.setColour (proc.uiLimGr.load() < -0.5f ? ui::cyan : ui::dim);
+        g.drawText (l3, a, Justification::centred);
+    }
+
     {
         g.setFont (ui::font (10.5f * s, true, 0.1f));
         const bool host = proc.uiHostSync.load();
         g.setColour (host ? (proc.uiHostPlaying.load() ? ui::cyan : ui::dim) : ui::text);
         g.drawText (String (proc.uiBpm.load(), 1) + " BPM  " + (host ? (proc.uiHostPlaying.load() ? "HOST  >" : "HOST  ||") : "FREE"),
                     midiInfoArea, Justification::centredRight);
-    }
-    // note detectee (AUTO)
-    {
-        auto a = autoInfoArea.toFloat();
-        const float hz = proc.uiPitchHz.load(), tn = proc.uiTargetNote.load();
-        const bool on = (int) proc.apvts.getRawParameterValue ("source")->load() == 1;
-        g.setColour (Colours::black.withAlpha (0.35f));
-        g.fillRoundedRectangle (a, 3.f);
-        g.setColour ((hz > 0.f && on) ? ui::green : ui::dim.withAlpha (0.6f));
-        g.setFont (ui::font (30.f * s, true, 0.05f));
-        g.drawText (on && tn >= 0.f ? noteName (tn) : String ("--"), a.withTrimmedBottom (a.getHeight() * 0.35f), Justification::centred);
-        g.setFont (ui::font (9.5f * s, true, 0.15f));
-        g.setColour (ui::dim);
-        g.drawText (on && hz > 0.f ? "VOIX " + String (hz, 0) + " Hz" : String ("NOTE DU ROBOT"),
-                    a.withTrimmedTop (a.getHeight() * 0.62f), Justification::centredTop);
     }
 
     if (messageTicks > 0)
@@ -1084,29 +600,41 @@ void VckEditor::resized()
     {
         return Rectangle<int> (roundToInt (x * s), roundToInt (y * s), roundToInt (w * s), roundToInt (h * s));
     };
+    panels.clear();
+    auto panel = [&] (const char* t, Colour c, float x, float y, float w, float h, int pg) { panels.push_back ({ T (t), c, R (x, y, w, h), pg }); };
+    auto row = [&] (std::initializer_list<Component*> cs, float x, float y, float w, float h, float step)
+    {
+        int i = 0;
+        for (auto* c : cs) { if (c != nullptr) c->setBounds (R (x + step * (float) i, y, w, h)); ++i; }
+    };
 
+    // ---- en-tete (positions de ravenn)
     header = R (0, 0, baseW, 70);
-    logoArea = R (14, 6, 240, 58);
-    prevBtn.setBounds (R (290, 18, 30, 34));
-    presetBox.setBounds (R (322, 18, 250, 34));
-    nextBtn.setBounds (R (574, 18, 30, 34));
-    saveBtn.setBounds (R (610, 18, 64, 34));
-    infoArea = R (690, 10, 410, 50);
-    bypass.setBounds (R (1116, 18, 108, 34));
+    logoArea = R (10, 6, 240, 58);
+    undoBtn.setBounds (R (254, 18, 46, 34));
+    redoBtn.setBounds (R (302, 18, 46, 34));
+    resetBtn.setBounds (R (350, 18, 54, 34));
+    prevBtn.setBounds (R (410, 18, 28, 34));
+    presetNameBtn.setBounds (R (440, 18, 180, 34));
+    nextBtn.setBounds (R (622, 18, 28, 34));
+    saveBtn.setBounds (R (654, 18, 56, 34));
+    folderBtn.setBounds (R (712, 18, 76, 34));
+    importBtn.setBounds (R (790, 18, 66, 34));
+    noLatency.setBounds (R (862, 18, 108, 34));
+    bypass.setBounds (R (974, 18, 86, 34));
+    for (int i = 0; i < slotBtns.size(); ++i) slotBtns[i]->setBounds (R (1066 + 30.f * (float) i, 18, 30, 34));
+    copyBtn.setBounds (R (1188, 18, 40, 34));
+    browser.setBounds (getLocalBounds().withTrimmedTop (roundToInt (70 * s)));
     msgArea = R (370, 74, 500, 30);
 
-    panels.clear();
-    auto panel = [&] (const char* t, Colour c, float x, float y, float w, float h) { panels.push_back ({ t, c, R (x, y, w, h) }); };
-
-    // ---- ligne 1
-    panel ("VOICE VIEW", ui::cyan, 12, 82, 796, 262);
+    // ---- ligne 1 : vue de la voix + MIDI (toujours visibles)
+    panel ("VOICE VIEW", ui::cyan, 12, 82, 796, 262, -1);
     voiceView.setBounds (R (26, 108, 770, 228));
-
-    panel ("MIDI", ui::pink, 820, 82, 408, 262);
+    panel ("MIDI", ui::pink, 820, 82, 408, 262, -1);
     midiInfoArea = R (1010, 90, 206, 18);
     roll.setBounds (R (834, 112, 380, 130));
-    importBtn.setBounds (R (830, 248, 122, 32));
-    clearBtn.setBounds (R (954, 248, 70, 32));
+    importMidiBtn.setBounds (R (830, 248, 122, 32));
+    clearMidiBtn.setBounds (R (954, 248, 70, 32));
     clipOn.setBounds (R (1026, 248, 96, 32));
     loop.setBounds (R (1124, 248, 96, 32));
     sync.setBounds (R (830, 300, 96, 30));
@@ -1114,55 +642,82 @@ void VckEditor::resized()
     bpm.setBounds (R (1042, 300, 84, 30));
     transpose.setBounds (R (1132, 300, 86, 30));
 
-    // ---- ligne 2
-    panel ("VOCODER", ui::violet, 12, 356, 400, 330);
-    bands.setBounds (R (26, 404, 372, 30));
-    {
-        NeonKnob* row1[] = { &formant, &sharp, &bright, &gate };
-        NeonKnob* row2[] = { &attack, &release, &sibil };
-        for (int i = 0; i < 4; ++i) row1[i]->setBounds (R (20.f + (float) i * 96.f, 446, 92, 112));
-        for (int i = 0; i < 3; ++i) row2[i]->setBounds (R (20.f + (float) i * 96.f, 564, 92, 112));
-        freeze.setBounds (R (20 + 3 * 96 + 8, 600, 78, 34));
-    }
+    // ---- onglets
+    for (int i = 0; i < tabs.size(); ++i) tabs[i]->setBounds (R (12.f + (float) i * 152.f, 354, 148, 32));
+    infoArea = R (778, 354, 222, 32);
 
-    panel ("CARRIER", ui::cyan, 424, 356, 500, 330);
-    source.setBounds (R (438, 400, 472, 36));
-    wave.setBounds (R (438, 460, 300, 28));
-    mode.setBounds (R (746, 460, 164, 28));
-    {
-        NeonKnob* row1[] = { &unison, &detune, &glide, &vibrato };
-        NeonKnob* row2[] = { &noise, &envA, &envR };
-        for (int i = 0; i < 4; ++i) row1[i]->setBounds (R (434.f + (float) i * 121.f, 494, 116, 94));
-        for (int i = 0; i < 3; ++i) row2[i]->setBounds (R (434.f + (float) i * 121.f, 590, 116, 94));
-        octave.setBounds (R (434 + 3 * 121 + 4, 626, 110, 28));
-    }
+    // ---- colonne de sortie (toujours visible)
+    panel ("OUTPUT", ui::red, 1008, 354, 220, 514, -1);
+    source.setBounds (R (1022, 404, 192, 108));
+    statusArea = R (1018, 518, 200, 54);
+    row ({ &robot, &voice }, 1016, 580, 100, 132, 104);
+    row ({ &width, &output }, 1016, 724, 100, 132, 104);
 
-    panel ("AUTO", ui::green, 936, 356, 292, 330);
-    key.setBounds (R (950, 402, 264, 56));
-    scale.setBounds (R (950, 486, 264, 30));
-    harmony.setBounds (R (950, 540, 264, 30));
-    retune.setBounds (R (944, 578, 118, 104));
-    autoInfoArea = R (1068, 584, 146, 90);
+    // ---- VOCODER
+    panel ("BANDES", ui::violet, 12, 394, 484, 474, pgVocoder);
+    bands.setBounds (R (26, 438, 456, 30));
+    bankView.setBounds (R (26, 478, 456, 226));
+    row ({ &loFreq, &hiFreq, &sharp, &spread }, 20, 716, 114, 144, 118);
+    panel ("ANALYSE", ui::cyan, 508, 394, 488, 232, pgVocoder);
+    row ({ &inGain, &gate, &attack, &release }, 516, 428, 90, 140, 94);
+    freeze.setBounds (R (516 + 4 * 94 + 4, 478, 84, 34));
+    panel ("TIMBRE", ui::pink, 508, 636, 488, 232, pgVocoder);
+    row ({ &formant, &bright, &character, &sibil, &breath }, 516, 670, 90, 140, 94);
 
-    // ---- ligne 3
-    panel ("DOUBLER", ui::violet, 12, 698, 520, 170);
-    dblVoices.setBounds (R (26, 734, 92, 120));
-    {
-        NeonKnob* k[] = { &dblDetune, &dblDelay, &dblWidth, &dblDrift, &dblMix };
-        for (int i = 0; i < 5; ++i) k[i]->setBounds (R (126.f + (float) i * 80.f, 730, 78, 128));
-    }
-    panel ("EFFECTS", ui::cyan, 544, 698, 412, 170);
-    delayTime.setBounds (R (850, 704, 96, 24));
-    {
-        NeonKnob* k[] = { &ensemble, &delayMix, &delayFb, &reverb, &revSize };
-        for (int i = 0; i < 5; ++i) k[i]->setBounds (R (550.f + (float) i * 80.f, 730, 78, 128));
-    }
-    panel ("OUTPUT", ui::red, 968, 698, 260, 170);
-    {
-        NeonKnob* k[] = { &robot, &voice, &output };
-        for (int i = 0; i < 3; ++i) k[i]->setBounds (R (974.f + (float) i * 83.f, 730, 81, 128));
-    }
+    // ---- CARRIER
+    panel ("OSCILLATEUR", ui::cyan, 12, 394, 484, 474, pgCarrier);
+    wave.setBounds (R (26, 438, 456, 30));
+    mode.setBounds (R (26, 494, 280, 30));
+    octave.setBounds (R (316, 494, 166, 30));
+    row ({ &unison, &detune, &sub, &noise }, 20, 540, 114, 150, 118);
+    row ({ &glide, &vibrato, &vibRate, &velSens }, 20, 704, 114, 150, 118);
+    panel ("ENVELOPPE & JEU", ui::pink, 508, 394, 488, 232, pgCarrier);
+    row ({ &envA, &envR, &bendRange }, 530, 428, 140, 140, 150);
+    panel ("SOURCES", ui::cyan, 508, 636, 488, 232, pgCarrier);
+    carrierInfoArea = R (526, 668, 456, 190);
+
+    // ---- AUTO
+    panel ("GAMME", ui::green, 12, 394, 484, 232, pgAuto);
+    key.setBounds (R (26, 438, 456, 30));
+    scale.setBounds (R (26, 494, 220, 30));
+    voiceRange.setBounds (R (256, 494, 226, 30));
+    drone.setBounds (R (26, 552, 140, 34));
+    autoInfoArea = R (186, 538, 296, 78);
+    panel ("CORRECTION", ui::green, 12, 636, 484, 232, pgAuto);
+    row ({ &retune, &humanize, &tracking, &hold }, 20, 670, 114, 144, 118);
+    panel ("PITCH", ui::green, 508, 394, 488, 300, pgAuto);
+    pitchGraph.setBounds (R (522, 424, 460, 258));
+    panel ("HARMONIES", ui::green, 508, 706, 488, 162, pgAuto);
+    harmony.setBounds (R (522, 762, 250, 30));
+    row ({ &harmLevel, &autoTrans }, 780, 730, 104, 132, 104);
+
+    // ---- DOUBLER
+    panel ("DOUBLER", ui::violet, 12, 394, 984, 170, pgDoubler);
+    dblVoices.setBounds (R (26, 430, 96, 120));
+    row ({ &dblMix, &dblDirect, &dblWidth, &dblDetune, &dblDelay, &dblDrift, &dblRate, &dblHpf, &dblLpf }, 132, 424, 92, 134, 95);
+    panel ("VOIX", ui::violet, 12, 576, 984, 292, pgDoubler);
+    dblColsArea = R (20, 604, 968, 258);
+    for (int v = 0; v < 4; ++v)
+        for (int k = 0; k < 4; ++k)
+        {
+            const float x = 24.f + (float) v * 242.f + (float) (k % 2) * 116.f;
+            const float y = 624.f + (float) (k / 2) * 120.f;
+            dblVoiceKnobs[v * 4 + k]->setBounds (R (x, y, 110, 116));
+        }
+
+    // ---- EFFECTS
+    panel ("COULEUR", ui::pink, 12, 394, 484, 232, pgEffects);
+    row ({ &drive, &lowCut, &highCut, &comp }, 20, 428, 114, 140, 118);
+    panel ("MODULATION", ui::cyan, 508, 394, 488, 232, pgEffects);
+    row ({ &ensemble, &ensRate, &phaser, &phRate, &phDepth }, 516, 428, 90, 140, 94);
+    panel ("DELAY", ui::violet, 12, 636, 484, 232, pgEffects);
+    row ({ &delayMix, &delayFb, &delayTone }, 20, 670, 114, 140, 118);
+    delayTime.setBounds (R (374, 690, 110, 30));
+    pingPong.setBounds (R (374, 742, 110, 34));
+    panel ("REVERB", ui::green, 508, 636, 488, 232, pgEffects);
+    row ({ &reverb, &revSize, &revPre, &revDamp, &revWidth }, 516, 670, 90, 140, 94);
 
     background = {};
+    browser.toFront (false);
     repaint();
 }

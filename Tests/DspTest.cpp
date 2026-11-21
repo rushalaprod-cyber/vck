@@ -94,6 +94,15 @@ static AudioBuffer<float> render (VckProcessor& p, double fs, double seconds, bo
         out.copyFrom (0, pos, buf, 0, 0, n);
         out.copyFrom (1, pos, buf, 1, 0, n);
     }
+    // compense la latence annoncee (mode HQ) pour comparer a la voix d'origine
+    const int lat = p.getLatencySamples();
+    if (lat > 0 && lat < total)
+        for (int c = 0; c < 2; ++c)
+        {
+            auto* d = out.getWritePointer (c);
+            std::memmove (d, d + lat, sizeof (float) * (size_t) (total - lat));
+            std::fill (d + total - lat, d + total, 0.f);
+        }
     return out;
 }
 
@@ -186,29 +195,30 @@ int main()
     outDir.createDirectory();
 
     // ------------------------------------------------------------------ presets
-    std::printf ("== Presets (%d)\n", (int) PresetManager::factory().size());
+    std::vector<String> presetNames;
+    { VckProcessor tmp; for (auto& f : tmp.presets.getFactory()) presetNames.push_back (f.name); }
+    std::printf ("== Presets (%d)\n", (int) presetNames.size());
     {
-        auto& list = PresetManager::factory();
-        for (int i = 0; i < (int) list.size(); ++i)
+        for (int i = 0; i < (int) presetNames.size(); ++i)
         {
             VckProcessor p;
             p.enableAllBuses();
             p.setPlayConfigDetails (2, 2, fs, 480);
             p.prepareToPlay (fs, 480);
-            p.presets.loadFactory (i);
+            p.presets.load (presetNames[(size_t) i]);
             const int src = (int) p.apvts.getRawParameterValue ("source")->load();
             p.prepareToPlay (fs, 480);
             auto out = render (p, fs, 4.0, src == 0);
             const float peak = out.getMagnitude (0, out.getNumSamples());
             const float rms = out.getRMSLevel (0, (int) fs, out.getNumSamples() - (int) fs);
             const float match = formantMatch (out, fs);
-            std::printf ("  %-28s src=%d  crete %5.2f dB  rms %6.1f dB  intelligibilite %.2f\n", list[(size_t) i].name, src,
+            std::printf ("  %-28s src=%d  crete %5.2f dB  rms %6.1f dB  intelligibilite %.2f\n", presetNames[(size_t) i].toRawUTF8(), src,
                          vck::gainToDb (peak), vck::gainToDb (rms), match);
-            CHECK (finiteAll (out), list[(size_t) i].name);
+            CHECK (finiteAll (out), "NaN");
             CHECK (peak <= 1.0001f, "ecretage");
             CHECK (rms > vck::dbToGain (-40.f), "sortie trop faible / silencieuse");
             CHECK (rms < vck::dbToGain (-3.f), "sortie trop forte");
-            const String nm (list[(size_t) i].name);
+            const String nm (presetNames[(size_t) i]);
             if (i < 9 || nm.contains ("Doubleur 4") || nm.contains ("Woods") || nm.contains ("Hide"))
                 writeWav (outDir.getChildFile (File::createLegalFileName (nm) + ".wav"), out, fs);
         }
@@ -352,13 +362,163 @@ int main()
         CHECK (ms < 4000.0, "trop lent");
     }
 
+    // ------------------------------------------------------------------ claquements
+    // "indice de clic" : plus grande derivee seconde, rapportee au niveau local du signal.
+    // Un son continu (voix, synthe) reste bas ; une discontinuite (clic) le fait exploser.
+    std::printf ("== Claquements\n");
+    auto clickScore = [&] (const AudioBuffer<float>& b)
+    {
+        const float* x = b.getReadPointer (0);
+        const int N = b.getNumSamples(), win = (int) (0.02 * fs);
+        double e = 0; std::vector<float> rms ((size_t) N, 0.f);
+        for (int i = 0; i < N; ++i)
+        {
+            e += (double) x[i] * x[i];
+            if (i >= win) e -= (double) x[i - win] * x[i - win];
+            rms[(size_t) i] = (float) std::sqrt (std::max (0.0, e) / win);
+        }
+        float worst = 0.f;
+        for (int i = 2 + win; i < N - 1; ++i)
+        {
+            const float d2 = std::abs (x[i] - 2.f * x[i - 1] + x[i - 2]);
+            worst = std::max (worst, d2 / (rms[(size_t) std::max (0, i - win / 2)] + 0.003f));
+        }
+        return worst;
+    };
+    {
+        // reference : un preset tenu sans rien toucher
+        VckProcessor ref; ref.setPlayConfigDetails (2, 2, fs, 480); ref.prepareToPlay (fs, 480);
+        ref.presets.load ("Init");
+        const float base = clickScore (render (ref, fs, 4.0, false));
+
+        // changement de preset toutes les 0,3 s pendant que la voix chante
+        VckProcessor p; p.setPlayConfigDetails (2, 2, fs, 480); p.prepareToPlay (fs, 480);
+        const int block = 480, total = (int) (fs * 6.0);
+        AudioBuffer<float> out (2, total), buf (2, block);
+        FakeVoice voice (fs);
+        int k = 0;
+        for (int pos = 0; pos < total; pos += block)
+        {
+            if (pos % (int) (0.3 * fs) < block) p.presets.load (presetNames[(size_t) (k++ % (int) presetNames.size())]);
+            buf.clear();
+            for (int i = 0; i < block; ++i) { const float v = voice.next(); buf.setSample (0, i, v); buf.setSample (1, i, v); }
+            MidiBuffer mb;
+            p.processBlock (buf, mb);
+            out.copyFrom (0, pos, buf, 0, 0, block); out.copyFrom (1, pos, buf, 1, 0, block);
+        }
+        const float sw = clickScore (out);
+        writeWav (outDir.getChildFile ("changements-de-presets.wav"), out, fs);
+        std::printf ("  indice de clic : preset tenu %.2f   changements de preset %.2f\n", base, sw);
+        CHECK (sw < base * 2.5f + 0.5f, "clic au changement de preset");
+
+        // nombre de bandes change en continu (le pire cas pour un vocoder)
+        VckProcessor q; q.setPlayConfigDetails (2, 2, fs, 480); q.prepareToPlay (fs, 480);
+        AudioBuffer<float> out2 (2, total);
+        FakeVoice voice2 (fs);
+        for (int pos = 0, j = 0; pos < total; pos += block, ++j)
+        {
+            if (j % 20 == 0) setP (q, "bands", (float) ((j / 20) % 7));
+            setP (q, "sharp", 0.5f + 0.5f * std::sin ((float) j * 0.05f));
+            buf.clear();
+            for (int i = 0; i < block; ++i) { const float v = voice2.next(); buf.setSample (0, i, v); buf.setSample (1, i, v); }
+            MidiBuffer mb;
+            q.processBlock (buf, mb);
+            out2.copyFrom (0, pos, buf, 0, 0, block);
+        }
+        const float sb = clickScore (out2);
+        std::printf ("  indice de clic : bandes / finesse modifiees en continu %.2f\n", sb);
+        CHECK (sb < base * 2.5f + 0.5f, "clic au changement de bandes");
+    }
+
+    // ------------------------------------------------------------------ MIDI sans notes -> AUTO
+    std::printf ("== Source MIDI sans notes\n");
+    {
+        VckProcessor p; p.setPlayConfigDetails (2, 2, fs, 480); p.prepareToPlay (fs, 480);
+        p.presets.load ("Around The World");
+        CHECK ((int) p.apvts.getRawParameterValue ("source")->load() == 0, "preset MIDI");
+        auto out = render (p, fs, 4.0, false);
+        const float rms = out.getRMSLevel (0, (int) fs, out.getNumSamples() - (int) fs);
+        std::printf ("  preset MIDI sans aucune note : rms %.1f dB (bascule AUTO %s)\n", vck::gainToDb (rms), p.uiAutoActive.load() ? "oui" : "non");
+        CHECK (rms > vck::dbToGain (-40.f), "preset MIDI muet sans notes");
+        auto out2 = render (p, fs, 2.0, true);
+        CHECK (! p.uiAutoActive.load(), "le MIDI ne reprend pas la main");
+    }
+
+    // ------------------------------------------------------------------ gamme, undo, latence
+    std::printf ("== Gamme / undo / latence\n");
+    {
+        VckProcessor p; p.setPlayConfigDetails (2, 2, fs, 480); p.prepareToPlay (fs, 480);
+        setP (p, "key", 9); setP (p, "scale", 3);
+        p.undo.beginNewTransaction();
+        p.presets.load ("One More Time");
+        p.presets.load ("Woods");
+        CHECK ((int) p.apvts.getRawParameterValue ("key")->load() == 9, "le preset a change la tonalite");
+        CHECK ((int) p.apvts.getRawParameterValue ("scale")->load() == 3, "le preset a change la gamme");
+        const float h = p.apvts.getRawParameterValue ("harmony")->load();
+        p.undo.undo();
+        CHECK (p.apvts.getRawParameterValue ("harmony")->load() != h || h == 0.f, "undo du preset");
+        p.resetAllParameters();
+        CHECK ((int) p.apvts.getRawParameterValue ("key")->load() == 9, "reset garde la gamme");
+        CHECK (std::abs (p.apvts.getRawParameterValue ("formant")->load()) < 1e-4f, "reset");
+        p.undo.undo();
+        std::printf ("  presets : tonalite et gamme conservees, undo / reset OK\n");
+
+        render (p, fs, 0.2, false);
+        const int hq = p.getLatencySamples();
+        setP (p, "noLatency", 1);
+        render (p, fs, 0.2, false);
+        const int nl = p.getLatencySamples();
+        std::printf ("  latence HQ %d echantillons (%.1f ms), NO LATENCY %d\n", hq, 1000.0 * hq / fs, nl);
+        CHECK (hq > 0 && nl == 0, "NO LATENCY");
+    }
+
+    // ------------------------------------------------------------------ doubleur : precision du desaccord
+    std::printf ("== Doubleur\n");
+    {
+        // sinus 220 Hz -> une seule voix doublee a +20 cents : la frequence mesuree doit etre 222.56 Hz
+        vck::Doubler d; d.prepare (fs);
+        vck::DoublerParams dp; dp.voices = 1; dp.mix = 1.f; dp.direct = 0.f; dp.drift = 0.f; dp.hpf = 20.f; dp.lpf = 20000.f;
+        dp.v[0] = { 12.f, 20.f, 0.f, 0.f }; dp.v[1] = { 12.f, 20.f, 0.f, -100.f };
+        d.setParams (dp);
+        const int N = (int) fs * 3;
+        std::vector<float> y ((size_t) N);
+        for (int i = 0; i < N; ++i)
+        {
+            float L = 0.5f * std::sin (2.f * vck::pi * 220.f * (float) i / (float) fs), R = L;
+            d.process (L, R);
+            y[(size_t) i] = L + R;
+        }
+        // frequence par passages a zero sur les 2 dernieres secondes
+        int zc = 0; double first = -1, last = -1;
+        for (int i = (int) fs + 1; i < N; ++i)
+            if (y[(size_t) i - 1] < 0.f && y[(size_t) i] >= 0.f)
+            {
+                const double t = (i - 1) + y[(size_t) i - 1] / (y[(size_t) i - 1] - y[(size_t) i]);
+                if (first < 0) first = t; last = t; ++zc;
+            }
+        const double f = (zc - 1) / ((last - first) / fs);
+        const double cents = 1200.0 * std::log2 (f / 220.0);
+        // regularite de l'enveloppe (pas de "flanger" / peigne) : ecart-type du niveau
+        double mn = 1e9, mx = 0;
+        for (int b = 1; b < 30; ++b)
+        {
+            double e = 0; const int s0 = (int) fs + b * 3200;
+            for (int i = 0; i < 1600; ++i) e += (double) y[(size_t) (s0 + i)] * y[(size_t) (s0 + i)];
+            mn = std::min (mn, e); mx = std::max (mx, e);
+        }
+        const double ripple = 10.0 * std::log10 (mx / std::max (1e-12, mn));
+        std::printf ("  +20 cents demandes : %.2f cents mesures, ondulation du niveau %.2f dB\n", cents, ripple);
+        CHECK (std::abs (cents - 20.0) < 1.5, "desaccord imprecis");
+        CHECK (ripple < 1.5, "doubleur : niveau instable (peigne)");
+    }
+
     // ------------------------------------------------------------------ interface
     std::printf ("== Interface\n");
     {
         VckProcessor p;
         p.setPlayConfigDetails (2, 2, fs, 480);
         p.prepareToPlay (fs, 480);
-        p.presets.loadFactory (3);
+        p.presets.load ("Digital Love");
         String err;
         p.loadMidi (outDir.getChildFile ("test.mid"), err);
         setP (p, "source", 0);
@@ -366,13 +526,28 @@ int main()
         std::unique_ptr<AudioProcessorEditor> ed (p.createEditor());
         ed->setSize (1240, 880);
         for (int i = 0; i < 30; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
-        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-        auto png = File::getCurrentWorkingDirectory().getChildFile ("dist").getChildFile ("apercu-interface.png");
-        png.getParentDirectory().createDirectory();
-        png.deleteFile();
-        FileOutputStream os (png);
-        PNGImageFormat().writeImageToStream (img, os);
-        std::printf ("  capture : %s\n", png.getFullPathName().toRawUTF8());
+        const char* names[5] = { "interface", "carrier", "auto", "doubler", "effects" };
+        for (int pg = 0; pg < 5; ++pg)
+        {
+            if (auto* ve = dynamic_cast<VckEditor*> (ed.get())) ve->setPage (pg);
+            for (int i = 0; i < 10; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            auto png = File::getCurrentWorkingDirectory().getChildFile ("dist").getChildFile (String ("apercu-") + names[pg] + ".png");
+            png.getParentDirectory().createDirectory();
+            png.deleteFile();
+            FileOutputStream os (png);
+            PNGImageFormat().writeImageToStream (img, os);
+        }
+        if (auto* ve = dynamic_cast<VckEditor*> (ed.get())) { ve->setPage (0); ve->showBrowser (true); }
+        for (int i = 0; i < 10; ++i) MessageManager::getInstance()->runDispatchLoopUntil (20);
+        {
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            auto png = File::getCurrentWorkingDirectory().getChildFile ("dist").getChildFile ("apercu-presets.png");
+            png.deleteFile();
+            FileOutputStream os (png);
+            PNGImageFormat().writeImageToStream (img, os);
+        }
+        std::printf ("  captures : dist/apercu-*.png\n");
         ed.reset();
     }
 

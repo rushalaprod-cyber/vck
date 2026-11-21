@@ -23,7 +23,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 5.0; }
+    double getTailLengthSeconds() const override { return 6.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -35,66 +35,101 @@ public:
     void setStateInformation (const void*, int) override;
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    juce::UndoManager undo { 400000, 100 };
     juce::AudioProcessorValueTreeState apvts;
     PresetManager presets;
+
+    // ---- facon ravenn : reset (une etape d'undo), slots A/B/C/D
+    void resetAllParameters();
+    int getABSlot() const { return abSlot; }
+    void selectSlot (int slot);
+    void copySlotTo (int dest);
+    bool slotHasState (int slot) const;
 
     // ---- clip MIDI
     bool loadMidi (const juce::File& f, juce::String& error);
     void clearMidi();
     vck::Clip getClipCopy() const { const juce::SpinLock::ScopedLockType l (clipLock); return clip; }
     std::atomic<int> clipVersion { 0 };
-    std::atomic<float> playBeat { -1.f };     // position dans le clip (pour l'affichage)
+    std::atomic<float> playBeat { -1.f };
+    std::atomic<bool> restartFree { false };
 
     // ---- affichage
     static constexpr int maxBands = vck::Vocoder::maxBands;
     std::array<std::atomic<float>, maxBands> uiMod {}, uiCar {}, uiOut {}, uiFreq {};
     std::atomic<int> uiBands { 24 };
-    std::atomic<float> uiPitchHz { 0.f }, uiTargetNote { -1.f }, uiBpm { 120.f }, uiInLevel { 0.f }, uiOutLevel { 0.f }, uiUnvoiced { 0.f };
-    std::atomic<bool> uiHostSync { false }, uiHostPlaying { false }, uiScConnected { false };
-    std::array<std::atomic<uint32_t>, 4> uiNotes {};   // 128 bits : notes de la porteuse
-    std::array<std::atomic<uint32_t>, 4> uiInNotes {}; // 128 bits : notes MIDI recues (clavier / clip)
+    std::atomic<float> uiPitchHz { 0.f }, uiTargetNote { -1.f }, uiBpm { 120.f }, uiInLevel { 0.f }, uiOutLevel { 0.f },
+                       uiUnvoiced { 0.f }, uiLatencyMs { 0.f }, uiLimGr { 0.f }, uiCompGr { 0.f };
+    std::atomic<bool> uiHostSync { false }, uiHostPlaying { false }, uiScConnected { false }, uiAutoActive { false }, uiGate { false };
+    std::array<std::atomic<uint32_t>, 4> uiNotes {}, uiInNotes {};
+    // historique de hauteur (graphe AUTO) : voix detectee / note du robot, en MIDI
+    static constexpr int pitchHist = 256;
+    std::array<std::atomic<float>, pitchHist> uiPitchIn {}, uiPitchOut {};
+    std::atomic<int> uiPitchWrite { 0 };
 
 private:
     void updateParams();
     void handleMidi (const juce::MidiMessage& m);
-    float autoNotes[5] {};
+    void applyLatencyMode (bool noLatency);
+    void autoTargets (float voiceLevel);
 
     vck::Vocoder vocoder;
     vck::CarrierSynth synth;
     vck::PitchTracker tracker;
     vck::Doubler doubler;
     vck::Ensemble ensemble;
+    vck::Phaser phaser;
     vck::TempoDelay delay;
     vck::Reverb reverb;
+    vck::Compressor comp;
+    vck::Limiter limiter;
+    std::array<vck::AdaaTanh, 2> drive;
+    std::array<vck::Svf, 2> lowCut, highCut;
     vck::ClipPlayer player;
     vck::Clip clip;
     juce::SpinLock clipLock;
     juce::MidiBuffer clipMidi;
-    std::array<bool, 128> heldIn {};
 
-    double fs = 48000.0, freeBeat = 0.0;
+    // retard d'anticipation (mode HQ) : voix, sec, sidechain et MIDI decales ensemble
+    vck::DelayLine dlyL, dlyR, dlyScL, dlyScR;
+    struct Pending { int64_t due; juce::MidiMessage msg; };
+    std::vector<Pending> pending;
+    int64_t sampleClock = 0;
+    int lookD = 0, limLA = 0;
+    bool latencyNoLat = false, latencyInit = false;
+
+    std::array<bool, 128> heldIn {};
+    int heldCount = 0;
+    double fs = 48000.0, freeBeat = 0.0, lastNoteTime = -100.0;
     int ctrlCount = 0;
     float scLevel = 0.f, scPeak = 1e-3f, voiceLev = 0.f;
-    juce::SmoothedValue<float> outSm, robotSm, voiceSm, bypassSm;
-    bool wasPlaying = false;
-    int lastSource = -1, lastPresetLoaded = -2;
-    float autoHold = 0.f, lastAutoNote = -1.f;
-    juce::AudioBuffer<float> dryBuf;
-public:
-    std::atomic<bool> restartFree { false };
-private:
+    vck::Smooth robotS, voiceS, outS, bypassS, widthS, driveS, inS;
+    float lowCutSet = -1.f, highCutSet = -1.f;
+    bool wasPlaying = false, clipActive = false;
+    int lastSource = -1;
+    float autoHold = 0.f, lastAutoNote = -1.f, autoNotes[5] {};
+
+    int abSlot = 0;
+    std::array<juce::ValueTree, 4> abState;
 
     std::atomic<float>* p (const char* id) { return apvts.getRawParameterValue (id); }
     struct Ptrs
     {
-        std::atomic<float> *bands, *formant, *attack, *release, *sharp, *sibil, *bright, *gate, *freeze,
-                           *source, *wave, *unison, *detune, *octave, *glide, *mode, *vibrato, *noise, *envA, *envR,
-                           *key, *scale, *harmony, *retune,
+        std::atomic<float> *bands, *formant, *attack, *release, *sharp, *sibil, *breath, *bright, *gate, *freeze,
+                           *inGain, *character, *spread, *loFreq, *hiFreq,
+                           *source, *wave, *unison, *detune, *octave, *glide, *mode, *vibrato, *vibRate, *noise, *envA, *envR,
+                           *sub, *velSens, *bendRange,
+                           *key, *scale, *harmony, *retune, *humanize, *autoTrans, *harmLevel, *tracking, *hold, *voiceRange, *drone,
                            *clipOn, *sync, *bpm, *transpose, *rate, *loop,
-                           *dblVoices, *dblDetune, *dblDelay, *dblWidth, *dblDrift, *dblMix,
-                           *ensemble, *delayMix, *delayTime, *delayFb, *reverb, *revSize,
-                           *robot, *voice, *output, *bypass;
+                           *dblVoices, *dblMix, *dblDirect, *dblWidth, *dblDetune, *dblDelay, *dblDrift, *dblRate, *dblHpf, *dblLpf,
+                           *dblVDelay[4], *dblVDetune[4], *dblVPan[4], *dblVGain[4],
+                           *drive, *lowCut, *highCut, *comp,
+                           *ensemble, *ensRate, *phaser, *phRate, *phDepth,
+                           *delayMix, *delayTime, *delayFb, *delayTone, *pingPong,
+                           *reverb, *revSize, *revPre, *revDamp, *revWidth,
+                           *robot, *voice, *width, *output, *bypass, *noLatency;
     } P {};
+    float bendSemis = 0.f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VckProcessor)
 };

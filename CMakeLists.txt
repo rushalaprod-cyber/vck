@@ -6,7 +6,7 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
 endif()
 
-project(vck VERSION 1.0.0)
+project(vck VERSION 1.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,7 @@ juce_add_binary_data(vckAssets SOURCES assets/raven.png assets/cover.jpg)
 set(VCK_SOURCES
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/Widgets.cpp
     Source/Presets.cpp)
 
 target_sources(vck PRIVATE ${VCK_SOURCES})

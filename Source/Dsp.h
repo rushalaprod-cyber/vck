@@ -1,16 +1,20 @@
 #pragma once
 // vck : moteur audio
-//  - Vocoder a banc de filtres (jusqu'a 64 bandes, filtres 4e ordre, porteuse blanchie)
-//  - Porteuse : synthe polyphonique anti-aliase (PolyBLEP), unisson, glide, vibrato
-//  - AUTO : suivi de hauteur de la voix (YIN) -> notes quantifiees dans une gamme + harmonies
-//  - Doubleur 2 / 4 voix (desaccord + retard + derive naturelle, facon Waves Doubler)
-//  - Ensemble, delai synchronise au tempo, reverbe FDN
+//  - Vocoder a banc de filtres de Butterworth (jusqu'a 64 bandes), traite en tableaux
+//    (vectorise), porteuse blanchie avec sortie bornee echantillon par echantillon
+//    (aucun pic possible), changement du nombre de bandes en fondu enchaine
+//  - Porteuse : synthe polyphonique anti-aliase (PolyBLEP), sub, unisson, glide, vibrato
+//  - AUTO : suivi de hauteur YIN -> notes quantifiees + harmonies
+//  - Doubleur 4 voix a decoupe synchrone (pas de filtrage en peigne), reglages par voix
+//  - Effets : saturation anti-repliement, EQ, compresseur, ensemble, phaser, delai, reverbe
+//  - Limiteur de sortie avec anticipation
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <vector>
 #include <cmath>
 #include <cstdint>
 #include <complex>
+#include <algorithm>
 
 namespace vck
 {
@@ -21,23 +25,21 @@ inline float gainToDb (float g)  { return 20.f * std::log10 (std::max (g, 1.0e-9
 inline float mtof (float m)      { return 440.f * std::exp2 ((m - 69.f) / 12.f); }
 inline float ftom (float f)      { return 69.f + 12.f * std::log2 (std::max (f, 1.f) / 440.f); }
 
-// Generateur pseudo-aleatoire rapide (xorshift) : pas d'allocation, pas de verrou
 struct Rng
 {
     uint32_t s = 0x9e3779b9u;
     explicit Rng (uint32_t seed = 1u) : s (seed * 2654435761u + 1u) {}
-    inline float next() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (float) (s >> 8) * (1.f / 8388608.f) - 1.f; } // [-1, 1)
+    inline float next() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (float) (s >> 8) * (1.f / 8388608.f) - 1.f; }
     inline float uni()  { return 0.5f * (next() + 1.f); }
 };
 
 //==============================================================================
-// Filtre a variables d'etat TPT (Zavalishin) : stable en modulation, tres propre
 struct Svf
 {
     float g = 0, k = 1, a1 = 0, a2 = 0, a3 = 0, ic1 = 0, ic2 = 0;
     void set (float fc, float Q, float fs)
     {
-        g = std::tan (pi * std::min (fc, 0.47f * fs) / fs);
+        g = std::tan (pi * std::clamp (fc, 5.f, 0.47f * fs) / fs);
         k = 1.f / Q;
         a1 = 1.f / (1.f + g * (g + k)); a2 = g * a1; a3 = g * a2;
     }
@@ -49,7 +51,7 @@ struct Svf
         v2 = ic2 + a2 * ic1 + a3 * v3;
         ic1 = 2.f * v1 - ic1; ic2 = 2.f * v2 - ic2;
     }
-    inline float bp (float x) { float v1, v2; tick (x, v1, v2); return k * v1; } // gain unitaire au centre
+    inline float bp (float x) { float v1, v2; tick (x, v1, v2); return k * v1; }
     inline float lp (float x) { float v1, v2; tick (x, v1, v2); return v2; }
     inline float hp (float x) { float v1, v2; tick (x, v1, v2); return x - k * v1 - v2; }
 };
@@ -62,7 +64,6 @@ struct OnePole
     inline float process (float x) { y = x + a * (y - x); return y; }
 };
 
-// Suiveur d'enveloppe 2 poles a attaque / relachement separes (peu d'ondulation)
 struct EnvFollower
 {
     float y1 = 0, y2 = 0, a = 0, r = 0;
@@ -81,8 +82,6 @@ struct EnvFollower
     }
 };
 
-//==============================================================================
-// Ligne a retard avec lecture interpolee (Hermite 4 points)
 struct DelayLine
 {
     std::vector<float> buf;
@@ -93,8 +92,8 @@ struct DelayLine
         buf.assign ((size_t) n, 0.f); mask = n - 1; w = 0;
     }
     void reset() { std::fill (buf.begin(), buf.end(), 0.f); }
+    int size() const { return mask + 1; }
     inline void push (float x) { buf[(size_t) w] = x; w = (w + 1) & mask; }
-    // d = retard en echantillons (>= 1)
     inline float read (float d) const
     {
         const float pos = (float) w - 1.f - std::max (1.f, d);
@@ -111,8 +110,16 @@ struct DelayLine
     inline float readInt (int d) const { return buf[(size_t) ((w - 1 - d) & mask)]; }
 };
 
+// Petit lisseur de parametre (evite le "zipper" quand on tourne un bouton)
+struct Smooth
+{
+    float v = 0, t = 0, a = 0.999f;
+    void init (float x, float ms, float fs) { v = t = x; a = std::exp (-1.f / (ms * 0.001f * fs)); }
+    inline float next() { v = t + a * (v - t); return v; }
+};
+
 //==============================================================================
-// Detecteur de hauteur YIN (sur un signal decime a ~12 kHz)
+// Detecteur de hauteur YIN (signal decime a ~12 kHz)
 class PitchTracker
 {
 public:
@@ -120,22 +127,27 @@ public:
     {
         decim = std::max (1, (int) std::round (fs / 12000.0));
         fsd = (float) fs / (float) decim;
-        tauMax = std::min (W - 2, (int) (fsd / 60.f));
-        tauMin = std::max (2, (int) (fsd / 1100.f));
         aa1.set (0.38f * fsd, 0.54f, (float) fs);
         aa2.set (0.38f * fsd, 1.31f, (float) fs);
         ring.assign (RING, 0.f);
-        frame.assign ((size_t) (W + tauMax + 2), 0.f);
-        d.assign ((size_t) tauMax + 2, 0.f);
+        frame.assign ((size_t) W + 1100, 0.f);
+        d.assign (1100, 0.f);
+        setRange (60.f, 1100.f);
         reset();
     }
+    void setRange (float fmin, float fmax)
+    {
+        tauMax = std::clamp ((int) (fsd / std::max (40.f, fmin)), 8, (int) d.size() - 2);
+        tauMin = std::max (2, (int) (fsd / std::max (fmin * 2.f, fmax)));
+    }
+    void setThreshold (float t) { thr = t; }
     void reset()
     {
         std::fill (ring.begin(), ring.end(), 0.f);
         aa1.reset(); aa2.reset(); wpos = 0; cnt = 0; hopCnt = 0;
         freq = 0.f; voiced = false; hist[0] = hist[1] = hist[2] = 0.f;
     }
-    // renvoie true quand une nouvelle analyse vient d'etre faite
+    float hopSeconds() const { return (float) (HOP * decim) / (fsd * (float) decim); }
     inline bool push (float x)
     {
         x = aa2.lp (aa1.lp (x));
@@ -147,12 +159,11 @@ public:
         analyse();
         return true;
     }
-    float freq = 0.f;          // Hz (0 = pas de hauteur)
+    float freq = 0.f, confidence = 0.f, level = 0.f;
     bool voiced = false;
-    float confidence = 0.f;
 
 private:
-    static constexpr int RING = 2048, W = 400, HOP = 96;
+    static constexpr int RING = 4096, W = 400, HOP = 96;
     void analyse()
     {
         const int n = W + tauMax;
@@ -162,10 +173,8 @@ private:
             const float v = ring[(size_t) ((wpos - n + i) & (RING - 1))];
             frame[(size_t) i] = v; if (i < W) energy += v * v;
         }
-        const float rms = std::sqrt (energy / (float) W);
-        if (rms < 0.0015f) { setResult (0.f, 0.f); return; }
-
-        // fonction de difference + normalisation cumulee
+        level = std::sqrt (energy / (float) W);
+        if (level < 0.0008f) { setResult (0.f, 0.f); return; }
         d[0] = 1.f;
         float run = 0.f;
         for (int tau = 1; tau <= tauMax; ++tau)
@@ -179,18 +188,16 @@ private:
         }
         int best = -1;
         for (int tau = tauMin; tau < tauMax; ++tau)
-        {
-            if (d[(size_t) tau] < 0.14f)
+            if (d[(size_t) tau] < thr)
             {
                 while (tau + 1 < tauMax && d[(size_t) tau + 1] < d[(size_t) tau]) ++tau;
                 best = tau; break;
             }
-        }
         if (best < 0)
         {
             float m = 1.f;
             for (int tau = tauMin; tau < tauMax; ++tau) if (d[(size_t) tau] < m) { m = d[(size_t) tau]; best = tau; }
-            if (m > 0.3f) { setResult (0.f, 0.f); return; }
+            if (m > thr * 2.2f || best < 0) { setResult (0.f, 0.f); return; }
         }
         float t = (float) best;
         if (best > 1 && best < tauMax)
@@ -204,33 +211,30 @@ private:
     void setResult (float f, float conf)
     {
         hist[0] = hist[1]; hist[1] = hist[2]; hist[2] = f;
-        // mediane de 3 : supprime les sauts d'octave isoles
-        float a = hist[0], b = hist[1], c = hist[2];
-        float med = std::max (std::min (a, b), std::min (std::max (a, b), c));
         if (f <= 0.f) { voiced = false; confidence = 0.f; return; }
-        freq = med > 0.f ? med : f; voiced = true; confidence = conf;
+        float a = hist[0] > 0 ? hist[0] : f, b = hist[1] > 0 ? hist[1] : f, c = f;
+        freq = std::max (std::min (a, b), std::min (std::max (a, b), c));
+        voiced = true; confidence = conf;
     }
     Svf aa1, aa2;
     std::vector<float> ring, frame, d;
     float hist[3] {};
     int decim = 4, wpos = 0, cnt = 0, hopCnt = 0, tauMax = 200, tauMin = 11;
-    float fsd = 12000.f;
+    float fsd = 12000.f, thr = 0.14f;
 };
 
 //==============================================================================
 // Synthe porteur
 struct SynthParams
 {
-    int wave = 0;            // 0 SAW, 1 SQUARE, 2 PULSE, 3 SUPER, 4 BUZZ
-    int unison = 1;          // 1..7
-    float detune = 0.2f;     // 0..1
-    float octave = 0.f;      // demi-tons (multiples de 12)
-    float glideMs = 0.f;
+    int wave = 0;            // 0 SAW, 1 SQUARE, 2 PULSE, 3 SUPER, 4 BUZZ, 5 NOISE
+    int unison = 1;
+    float detune = 0.2f, octave = 0.f, glideMs = 0.f;
     int mode = 0;            // 0 POLY, 1 MONO, 2 LEGATO
-    float vibrato = 0.f;     // 0..1
+    float vibrato = 0.f, vibRate = 5.6f;
     float attackMs = 5.f, releaseMs = 120.f;
-    float noise = 0.f;
-    float width = 0.6f;      // ouverture stereo de l'unisson
+    float noise = 0.f, sub = 0.f, velSens = 0.7f, bend = 0.f;
+    float width = 0.6f, harmLevel = 0.8f;
 };
 
 class CarrierSynth
@@ -241,40 +245,41 @@ public:
     void prepare (double sampleRate)
     {
         fs = (float) sampleRate;
-        for (auto& v : voices) v = Voice();
+        for (int i = 0; i < maxVoices; ++i) { voices[(size_t) i] = Voice(); voices[(size_t) i].seed (i); }
         stack.clear(); stack.reserve (128);
-        for (int i = 0; i < maxVoices; ++i) voices[(size_t) i].seed (i);
         vibPhase = 0;
     }
     void setParams (const SynthParams& p) { prm = p; }
     void allNotesOff() { for (auto& v : voices) v.gate = false; stack.clear(); }
+    bool isAuto() const { return autoMode; }
 
     void noteOn (int note, float vel)
     {
         if (autoMode) return;
+        vel = 1.f - prm.velSens + prm.velSens * vel;
         if (prm.mode != 0)
         {
             removeFromStack (note);
             stack.push_back (note);
             auto& v = voices[0];
-            const bool legatoHeld = v.gate && v.note >= 0;
-            const bool slide = prm.mode == 1 ? (v.note >= 0) : legatoHeld;
-            v.start (note, vel, slide && prm.glideMs > 0.f, ++counter, prm.mode == 2 && legatoHeld, prm.octave);
+            const bool held = v.gate && v.note >= 0;
+            const bool slide = prm.mode == 1 ? (v.note >= 0) : held;
+            v.start (note, vel, slide && prm.glideMs > 0.f, ++counter, prm.mode == 2 && held, prm.octave);
             return;
         }
-        // POLY : meme note deja tenue -> on la relance
         int idx = -1;
-        for (int i = 0; i < maxVoices; ++i) if (voices[(size_t) i].note == note && voices[(size_t) i].env > 0.f) { idx = i; break; }
+        for (int i = 0; i < maxVoices; ++i) if (voices[(size_t) i].note == note && voices[(size_t) i].active()) { idx = i; break; }
         if (idx < 0) for (int i = 0; i < maxVoices; ++i) if (! voices[(size_t) i].active()) { idx = i; break; }
         if (idx < 0)
-        {   // vol de voix : la plus faible des relachees, sinon la plus ancienne
+        {
             float best = 2.f; uint32_t oldest = UINT32_MAX;
             for (int i = 0; i < maxVoices; ++i) if (! voices[(size_t) i].gate && voices[(size_t) i].env < best) { best = voices[(size_t) i].env; idx = i; }
             if (idx < 0) for (int i = 0; i < maxVoices; ++i) if (voices[(size_t) i].order < oldest) { oldest = voices[(size_t) i].order; idx = i; }
         }
         auto& v = voices[(size_t) idx];
-        if (prm.glideMs > 0.f && lastNote >= 0) v.logF = std::log (mtof ((float) lastNote + prm.octave));
-        v.start (note, vel, prm.glideMs > 0.f && lastNote >= 0, ++counter, false, prm.octave);
+        const bool slide = prm.glideMs > 0.f && lastNote >= 0;
+        if (slide) v.logF = std::log (mtof ((float) lastNote + prm.octave));
+        v.start (note, vel, slide, ++counter, false, prm.octave);
         lastNote = note;
     }
 
@@ -293,8 +298,13 @@ public:
         for (auto& v : voices) if (v.note == note && v.gate) v.gate = false;
     }
 
-    // Mode AUTO : la porteuse suit la voix (jusqu'a 5 voix d'harmonie)
-    void setAuto (bool on) { if (on != autoMode) { autoMode = on; for (auto& v : voices) v.gate = false; stack.clear(); } }
+    void setAuto (bool on)
+    {
+        if (on == autoMode) return;
+        autoMode = on;
+        for (auto& v : voices) v.gate = false;
+        stack.clear();
+    }
     void setAutoTargets (const float* notes, int count, bool gate)
     {
         for (int i = 0; i < 5; ++i)
@@ -302,8 +312,14 @@ public:
             auto& v = voices[(size_t) i];
             if (i < count && gate)
             {
-                if (! v.gate) { v.order = ++counter; if (v.env < 0.01f) v.logF = std::log (mtof (notes[i] + prm.octave)); }
-                v.gate = true; v.vel = 1.f; v.note = (int) std::round (notes[i]);
+                if (! v.gate)
+                {
+                    v.order = ++counter;
+                    if (v.env < 0.02f) v.logF = std::log (mtof (notes[i] + prm.octave));
+                }
+                v.gate = true;
+                v.vel = i == 0 ? 1.f : prm.harmLevel;
+                v.note = std::clamp ((int) std::round (notes[i]), 0, 127);
                 v.targetNote = notes[i];
             }
             else v.gate = false;
@@ -311,20 +327,18 @@ public:
     }
     float autoGlideMs = 30.f;
 
-    // niveau courant de la porteuse (somme des enveloppes, pour respecter velocite et relachement)
     float level() const { return levelNow; }
-    int activeNotes (std::array<bool, 128>& out) const
+    void activeNotes (std::array<bool, 128>& out) const
     {
-        out.fill (false); int n = 0;
-        for (auto& v : voices) if (v.gate && v.note >= 0 && v.note < 128) { out[(size_t) v.note] = true; ++n; }
-        return n;
+        out.fill (false);
+        for (auto& v : voices) if (v.gate && v.note >= 0 && v.note < 128) out[(size_t) v.note] = true;
     }
+    bool anyGate() const { for (auto& v : voices) if (v.gate) return true; return false; }
 
-    // met a jour les frequences (a appeler toutes les ~16 echantillons)
     void control (int samples)
     {
         const float dtc = (float) samples / fs;
-        vibPhase += dtc * 5.6f; if (vibPhase > 1.f) vibPhase -= 1.f;
+        vibPhase += dtc * prm.vibRate; if (vibPhase > 1.f) vibPhase -= 1.f;
         const float vib = std::sin (2.f * pi * vibPhase);
         const int u = std::clamp (prm.wave == 3 ? std::max (prm.unison, 5) : prm.unison, 1, maxUnison);
         const float spreadSemi = (prm.wave == 3 ? 0.35f + 0.5f * prm.detune : 0.5f * prm.detune);
@@ -339,18 +353,18 @@ public:
             if (! v.active()) continue;
             const float target = std::log (mtof ((autoMode ? v.targetNote : (float) v.note) + prm.octave));
             v.logF += (target - v.logF) * gc;
-            // enveloppe d'amplitude (attaque lineaire douce, relachement exponentiel)
             if (v.gate) v.envTarget = std::min (1.f, v.envTarget + aInc);
             else v.envTarget *= rMul;
             v.envStep = (v.envTarget - v.env) / (float) samples;
             v.vibAge = v.gate ? std::min (1.f, v.vibAge + dtc / 0.45f) : v.vibAge;
-            const float vibSemi = prm.vibrato * 0.55f * v.vibAge * vib;
+            const float vibSemi = prm.vibrato * 0.55f * v.vibAge * vib + (autoMode ? 0.f : prm.bend);
             for (int k = 0; k < u; ++k)
             {
                 const float off = u == 1 ? 0.f : spread (k, u) * spreadSemi + 0.03f * v.rnd[(size_t) k];
-                float f = std::exp (v.logF + (vibSemi + off) * lnSemi);
+                const float f = std::exp (v.logF + (vibSemi + off) * lnSemi);
                 v.dt[(size_t) k] = std::min (0.45f, f / fs);
             }
+            v.subDt = std::min (0.45f, std::exp (v.logF + vibSemi * lnSemi) * 0.5f / fs);
             v.u = u;
             lvl += v.envTarget * v.vel;
             if (! v.gate && v.envTarget < 1.0e-4f && v.env < 1.0e-4f) { v.note = -1; v.env = v.envTarget = 0.f; }
@@ -368,7 +382,7 @@ public:
             v.env += v.envStep;
             const float amp = v.env * v.vel;
             if (amp <= 0.f) continue;
-            if (prm.wave == 5)   // NOISE : souffle (voix chuchotee)
+            if (prm.wave == 5)
             {
                 L += noise.next() * amp * 0.35f;
                 R += noise.next() * amp * 0.35f;
@@ -392,10 +406,17 @@ public:
                 L += s * amp * norm * (1.f - p);
                 R += s * amp * norm * (1.f + p);
             }
+            if (prm.sub > 0.f)
+            {
+                float s = (v.subPh < 0.5f ? 1.f : -1.f) + blep (v.subPh, v.subDt) - blep (frac (v.subPh + 0.5f), v.subDt);
+                v.subPh += v.subDt; if (v.subPh >= 1.f) v.subPh -= 1.f;
+                s *= amp * 0.3f * prm.sub;
+                L += s; R += s;
+            }
         }
         if (prm.noise > 0.f)
         {
-            const float n = noise.next() * 0.25f * prm.noise * std::max (levelNow, 0.f);
+            const float n = noise.next() * 0.25f * prm.noise * levelNow;
             L += n; R += n;
         }
     }
@@ -413,7 +434,7 @@ private:
     struct Voice
     {
         int note = -1; bool gate = false; float vel = 0.f, env = 0.f, envTarget = 0.f, envStep = 0.f;
-        float logF = std::log (440.f), targetNote = 69.f, vibAge = 0.f;
+        float logF = std::log (440.f), targetNote = 69.f, vibAge = 0.f, subPh = 0.f, subDt = 0.f;
         uint32_t order = 0; int u = 1;
         std::array<float, maxUnison> ph {}, dt {}, rnd {};
         bool active() const { return note >= 0; }
@@ -429,7 +450,6 @@ private:
             if (! legato) vibAge = 0.f;
         }
     };
-
     void removeFromStack (int n) { stack.erase (std::remove (stack.begin(), stack.end(), n), stack.end()); }
 
     std::array<Voice, maxVoices> voices;
@@ -443,99 +463,308 @@ private:
 };
 
 //==============================================================================
-// Vocoder a banc de filtres
+// Banc de filtres en tableaux : chaque etage traite toutes les bandes d'un coup
+constexpr int MB = 64;
+
+struct BankStage
+{
+    alignas (32) float a1[MB] {}, a2[MB] {}, a3[MB] {}, k[MB] {}, s1[MB] {}, s2[MB] {};
+    void set (int i, float fc, float Q, float fs)
+    {
+        const float g = std::tan (pi * std::clamp (fc, 5.f, 0.47f * fs) / fs);
+        k[i] = 1.f / Q;
+        a1[i] = 1.f / (1.f + g * (g + k[i])); a2[i] = g * a1[i]; a3[i] = g * a2[i];
+    }
+    void reset() { std::fill (std::begin (s1), std::end (s1), 0.f); std::fill (std::begin (s2), std::end (s2), 0.f); }
+    inline void runScalar (float x, float* out, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float v3 = x - s2[i];
+            const float v1 = a1[i] * s1[i] + a2[i] * v3;
+            const float v2 = s2[i] + a2[i] * s1[i] + a3[i] * v3;
+            s1[i] = 2.f * v1 - s1[i]; s2[i] = 2.f * v2 - s2[i];
+            out[i] = k[i] * v1;
+        }
+    }
+    inline void run (float* io, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float v3 = io[i] - s2[i];
+            const float v1 = a1[i] * s1[i] + a2[i] * v3;
+            const float v2 = s2[i] + a2[i] * s1[i] + a3[i] * v3;
+            s1[i] = 2.f * v1 - s1[i]; s2[i] = 2.f * v2 - s2[i];
+            io[i] = k[i] * v1;
+        }
+    }
+    // dernier etage : sortie + composante en quadrature (pour l'enveloppe instantanee)
+    inline void runQuad (float* io, float* quad, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float v3 = io[i] - s2[i];
+            const float v1 = a1[i] * s1[i] + a2[i] * v3;
+            const float v2 = s2[i] + a2[i] * s1[i] + a3[i] * v3;
+            s1[i] = 2.f * v1 - s1[i]; s2[i] = 2.f * v2 - s2[i];
+            io[i] = k[i] * v1; quad[i] = k[i] * v2;
+        }
+    }
+};
+
+// Conception exacte d'un passe-bande de Butterworth d'ordre 2*M en M cellules SVF
+inline float butterworthBandpass (float centre, float bwOct, int M, float fs, float* fcs, float* qs)
+{
+    using C = std::complex<double>;
+    constexpr double dpi = 3.141592653589793;
+    const double fl = centre * std::exp2 (-0.5 * bwOct), fh = std::min (0.46 * fs, centre * std::exp2 (0.5 * bwOct));
+    const double wl = std::tan (dpi * fl / fs), wh = std::tan (dpi * fh / fs);
+    const double w0 = std::sqrt (wl * wh), B = std::max (1e-6, wh - wl);
+    int s = 0;
+    C total (1.0, 0.0);
+    auto add = [&] (C pole)
+    {
+        if (pole.imag() < 0) pole = std::conj (pole);
+        const double wi = std::abs (pole), qi = wi / std::max (1e-9, -2.0 * pole.real());
+        fcs[s] = (float) (std::atan (wi) * fs / dpi);
+        qs[s] = (float) std::clamp (qi, 0.3, 200.0);
+        const C jw (0.0, w0);
+        total *= (jw * wi / qi) / (jw * jw + jw * wi / qi + wi * wi);
+        ++s;
+    };
+    for (int k = 0; k < M; ++k)
+    {
+        const C p = std::polar (1.0, dpi * (2.0 * k + M + 1.0) / (2.0 * M));
+        const bool real = std::abs (p.imag()) < 1e-6;
+        if (! real && p.imag() < 0.0) continue;
+        const C pb = C (real ? -1.0 : p.real(), real ? 0.0 : p.imag()) * B;
+        const C d = std::sqrt (pb * pb - 4.0 * w0 * w0);
+        if (real) add ((pb + d) * 0.5);
+        else { add ((pb + d) * 0.5); add ((pb - d) * 0.5); }
+    }
+    return (float) (1.0 / std::max (1e-12, std::abs (total)));
+}
+
+struct Bank
+{
+    int n = 0;
+    BankStage m[4], cl[3], cr[3];
+    alignas (32) float gA[MB] {}, gS[MB] {}, e1[MB] {}, e2[MB] {}, ea[MB] {}, er[MB] {}, modEnv[MB] {},
+                       ce[MB] {}, ceA[MB] {}, ceR[MB] {}, g[MB] {}, gStep[MB] {}, pL[MB] {}, pR[MB] {}, fc[MB] {}, tilt[MB] {};
+    float spacing = 1.f;
+
+    void design (int bands, float lo, float hi, float sharp, float fs, bool resetState)
+    {
+        n = std::clamp (bands, 4, MB);
+        hi = std::min (hi, 0.42f * fs);
+        lo = std::clamp (lo, 30.f, hi * 0.25f);
+        const float r = std::pow (hi / lo, 1.f / (float) (n - 1));
+        const float eff = std::log2 (r) * (1.3f - 0.5f * sharp);
+        spacing = std::log2 (r) * 12.f;
+        float f4[4], q4[4], f3[3], q3[3];
+        for (int i = 0; i < n; ++i)
+        {
+            fc[i] = lo * std::pow (r, (float) i);
+            gA[i] = butterworthBandpass (fc[i], eff, 4, fs, f4, q4);
+            gS[i] = butterworthBandpass (fc[i], eff, 3, fs, f3, q3);
+            for (int s = 0; s < 4; ++s) m[s].set (i, f4[s], q4[s], fs);
+            for (int s = 0; s < 3; ++s) { cl[s].set (i, f3[s], q3[s], fs); cr[s].set (i, f3[s], q3[s], fs); }
+            // l'enveloppe instantanee de la porteuse relache sur quelques periodes
+            ceA[i] = std::exp (-1.f / (0.0005f * fs));
+            ceR[i] = std::exp (-1.f / (std::max (0.006f, 3.f / fc[i]) * fs));
+        }
+        if (resetState)
+        {
+            for (auto* st : { &m[0], &m[1], &m[2], &m[3], &cl[0], &cl[1], &cl[2], &cr[0], &cr[1], &cr[2] }) st->reset();
+            for (int i = 0; i < MB; ++i) { e1[i] = e2[i] = modEnv[i] = ce[i] = g[i] = gStep[i] = 0.f; }
+        }
+    }
+    void setEnv (float attMs, float relMs, float fs)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            ea[i] = std::exp (-1.f / (std::max (attMs, 600.f / fc[i]) * 0.001f * fs));
+            er[i] = std::exp (-1.f / (std::max (relMs, 2200.f / fc[i]) * 0.001f * fs));
+        }
+    }
+    void setSpread (float s)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float p = s * ((i & 1) ? 1.f : -1.f);
+            const float a = (p + 1.f) * 0.25f * pi;
+            pL[i] = std::cos (a) * 1.41421356f; pR[i] = std::sin (a) * 1.41421356f;
+        }
+    }
+    void setTilt (float db)
+    {
+        for (int i = 0; i < n; ++i) tilt[i] = dbToGain (db * std::log2 (fc[i] / 1000.f) / std::log2 (10.f));
+    }
+
+    inline void tick (float voice, float carL, float carR, bool freeze, float floor, float& yL, float& yR)
+    {
+        alignas (32) float b[MB], bl[MB], br[MB], ql[MB], qr[MB];
+        m[0].runScalar (voice, b, n); m[1].run (b, n); m[2].run (b, n); m[3].run (b, n);
+        if (! freeze)
+            for (int i = 0; i < n; ++i)
+            {
+                const float x = std::abs (b[i] * gA[i]);
+                e1[i] = x + (x > e1[i] ? ea[i] : er[i]) * (e1[i] - x);
+                e2[i] = e1[i] + (e1[i] > e2[i] ? ea[i] : er[i]) * (e2[i] - e1[i]);
+                modEnv[i] = e2[i];
+            }
+        cl[0].runScalar (carL, bl, n); cl[1].run (bl, n); cl[2].runQuad (bl, ql, n);
+        cr[0].runScalar (carR, br, n); cr[1].run (br, n); cr[2].runQuad (br, qr, n);
+        float sl = 0.f, sr = 0.f;
+        for (int i = 0; i < n; ++i)
+        {
+            const float ampL = std::sqrt (bl[i] * bl[i] + ql[i] * ql[i]);
+            const float ampR = std::sqrt (br[i] * br[i] + qr[i] * qr[i]);
+            const float amp = gS[i] * std::max (ampL, ampR);
+            ce[i] = amp + (amp > ce[i] ? ceA[i] : ceR[i]) * (ce[i] - amp);
+            // diviseur >= amplitude instantanee : la sortie de la bande ne peut jamais depasser son gain
+            const float den = std::max (std::max (ce[i], amp), floor);
+            g[i] += gStep[i];
+            const float f = g[i] * gS[i] / den;
+            sl += bl[i] * f * pL[i];
+            sr += br[i] * f * pR[i];
+        }
+        yL = sl; yR = sr;
+    }
+
+    // gains cibles (cadence de controle)
+    void control (float shiftBands, float whiten, float dyn, float floor, int ctrl)
+    {
+        float mean = 0.f;
+        for (int i = 0; i < n; ++i) mean += ce[i];
+        mean = mean / (float) n + 1e-9f;
+        const float presence = mean / (mean + floor);
+        const float ex = 1.f - whiten;
+        for (int i = 0; i < n; ++i)
+        {
+            const float src = (float) i - shiftBands;
+            float me = 0.f;
+            if (src >= 0.f && src <= (float) (n - 1))
+            {
+                const int i0 = (int) src; const float t = src - (float) i0;
+                const int i1 = std::min (n - 1, i0 + 1);
+                me = modEnv[i0] * (1.f - t) + modEnv[i1] * t;
+            }
+            else if (src > -1.f && src < 0.f) me = modEnv[0] * (1.f + src);
+            else if (src > (float) (n - 1) && src < (float) n) me = modEnv[n - 1] * ((float) n - src);
+            float gain = me * tilt[i] * presence * dyn;
+            if (ex > 0.001f) gain *= std::pow (std::max (ce[i], floor) / mean, ex);
+            gStep[i] = (gain - g[i]) / (float) ctrl;
+        }
+    }
+    float meanCarrier() const { float s = 0.f; for (int i = 0; i < n; ++i) s += ce[i]; return n > 0 ? s / (float) n : 0.f; }
+};
+
 struct VocoderParams
 {
     int bands = 24;
-    float formant = 0.f;     // demi-tons
-    float attackMs = 4.f, releaseMs = 40.f;
-    float sharp = 0.5f;      // 0 = bandes larges et douces, 1 = bandes fines et precises
-    float sibilance = 0.5f;  // consonnes (s, ch, t) : passage direct + bruit dans la porteuse
-    float bright = 3.f;      // inclinaison des aigus (dB)
-    float gateDb = -60.f;
+    float formant = 0.f, attackMs = 4.f, releaseMs = 40.f, sharp = 0.5f;
+    float sibilance = 0.5f, breath = 0.4f, bright = 3.f, gateDb = -60.f;
+    float character = 0.1f, spread = 0.f, lo = 80.f, hi = 12000.f;
     bool freeze = false;
 };
 
 class Vocoder
 {
 public:
-    static constexpr int maxBands = 64, ctrl = 16;
+    static constexpr int maxBands = MB, ctrl = 16;
 
     void prepare (double sampleRate)
     {
         fs = (float) sampleRate;
-        builtBands = -1;
         hpA.set (3800.f, 0.54f, fs); hpB.set (3800.f, 1.31f, fs);
         detHp.set (4500.f, 0.707f, fs);
         hfEnv.set (2.f, 30.f, fs); totEnv.set (2.f, 30.f, fs);
-        gateEnv.set (1.f, 60.f, fs);
+        gateEnv.set (1.f, 40.f, fs);
         uvSmooth.setMs (8.f, fs);
-        gateSmooth.setMs (25.f, fs);
-        rmsIn.setMs (350.f, fs); rmsOut.setMs (350.f, fs);
-        carPeak = 1e-3f;
-        autoGain = 1.f;
+        gateSmooth.setMs (12.f, fs);
+        rmsIn.setMs (400.f, fs); rmsOut.setMs (400.f, fs);
+        carPeak = 1e-4f; autoGain = autoGainTarget = 1.f;
+        built = false; cur = 0; xf = 1.f;
+        holdLeft = 0;
     }
 
     void setParams (const VocoderParams& p)
     {
-        const bool rebuild = p.bands != prm.bands || p.sharp != prm.sharp || builtBands < 0;
-        const bool env = rebuild || p.attackMs != prm.attackMs || p.releaseMs != prm.releaseMs;
+        const bool first = ! built;
+        const bool countChanged = first || p.bands != prm.bands;
+        const bool shape = first || p.sharp != prm.sharp || p.lo != prm.lo || p.hi != prm.hi;
+        const bool env = shape || countChanged || p.attackMs != prm.attackMs || p.releaseMs != prm.releaseMs;
+        const bool spr = env || p.spread != prm.spread;
+        const bool tl = shape || countChanged || p.bright != prm.bright;
         prm = p;
-        if (rebuild) build();
-        else if (env) setEnvelopes();
-        if (rebuild || tiltBuilt != p.bright)
+        if (countChanged)
         {
-            tiltBuilt = p.bright;
-            for (int i = 0; i < n; ++i)
-                tilt[(size_t) i] = dbToGain (p.bright * std::log2 (fc[(size_t) i] / 1000.f) / std::log2 (10.f));
+            if (first) { banks[0].design (p.bands, p.lo, p.hi, p.sharp, fs, true); cur = 0; xf = 1.f; }
+            else
+            {
+                // nouveau nombre de bandes : on construit l'autre banc et on passe en fondu
+                prev = cur; cur = 1 - cur;
+                banks[cur].design (p.bands, p.lo, p.hi, p.sharp, fs, true);
+                xf = 0.f;
+            }
+            built = true;
         }
+        else if (shape) banks[cur].design (p.bands, p.lo, p.hi, p.sharp, fs, false);   // coefficients seulement : pas de clic
+        auto& b = banks[cur];
+        if (env) b.setEnv (p.attackMs, p.releaseMs, fs);
+        if (spr) b.setSpread (p.spread);
+        if (tl) b.setTilt (p.bright);
     }
 
-    // traite un echantillon : voix (mono) + porteuse stereo -> sortie stereo.
-    // carNoiseLevel : niveau de bruit a injecter pour les consonnes (gere ici)
     inline void process (float voice, float carL, float carR, float carrierLevel, float& outL, float& outR)
     {
-        // ---- detection des consonnes / du gate sur la voix
+        // consonnes / gate
         const float tot = totEnv.process (voice);
         const float hf = hfEnv.process (detHp.hp (voice));
-        const float ratio = hf / (tot + 1e-6f);
-        float uv = std::clamp ((ratio - 0.22f) / 0.35f, 0.f, 1.f);
+        float uv = std::clamp ((hf / (tot + 1e-6f) - 0.22f) / 0.35f, 0.f, 1.f);
         uv = uvSmooth.process (uv * uv * (3.f - 2.f * uv));
-        const float lev = gateEnv.process (voice);
-        const float gTarget = gainToDb (lev * 1.4142f) > prm.gateDb ? 1.f : 0.f;
-        const float gate = gateSmooth.process (gTarget);
         unvoiced = uv;
+        // gate avec hysteresis (6 dB) et maintien (80 ms) : il ne "bat" jamais
+        const float levDb = gainToDb (gateEnv.process (voice) * 1.4142f);
+        if (levDb > prm.gateDb) { gateOpen = true; holdLeft = (int) (0.08f * fs); }
+        else if (levDb < prm.gateDb - 6.f && --holdLeft <= 0) gateOpen = false;
+        const float gate = gateSmooth.process (gateOpen ? 1.f : 0.f);
 
-        // bruit dans la porteuse pendant les consonnes (rend les "s" et "f" naturels)
         const float carMid = 0.5f * (carL + carR);
         carRms = carRms * 0.9995f + 0.0005f * carMid * carMid;
-        const float nz = noise.next() * std::sqrt (carRms) * 2.2f * prm.sibilance * uv;
+        const float nz = noise.next() * std::sqrt (carRms) * 2.5f * prm.breath * uv;
         carL += nz; carR += nz;
 
-        // ---- banc de filtres
-        float yL = 0.f, yR = 0.f;
-        for (int i = 0; i < n; ++i)
+        const float floor = 1.0e-7f + 0.002f * carPeak;
+        float yL, yR;
+        banks[cur].tick (voice, carL, carR, prm.freeze, floor, yL, yR);
+        if (xf < 1.f)
         {
-            auto& b = band[(size_t) i];
-            const float m = b.gA * b.m[3].bp (b.m[2].bp (b.m[1].bp (b.m[0].bp (voice))));   // analyse : Butterworth 8e ordre
-            if (! prm.freeze) b.modEnv = b.mEnv.process (m);
-            const float cl = b.gS * b.cl[2].bp (b.cl[1].bp (b.cl[0].bp (carL)));            // synthese : Butterworth 6e ordre
-            const float cr = b.gS * b.cr[2].bp (b.cr[1].bp (b.cr[0].bp (carR)));
-            b.carEnv = b.cEnv.process (0.5f * (cl + cr));
-            b.g += b.gStep;
-            yL += cl * b.g; yR += cr * b.g;
+            float pL, pR;
+            banks[prev].tick (voice, carL, carR, prm.freeze, floor, pL, pR);
+            const float w = 0.5f - 0.5f * std::cos (pi * xf);
+            yL = yL * w + pL * (1.f - w); yR = yR * w + pR * (1.f - w);
+            xf = std::min (1.f, xf + 1.f / (0.04f * fs));
         }
 
-        // ---- gains (a cadence de controle)
-        if (++ctrlCount >= ctrl) { ctrlCount = 0; updateGains (carrierLevel); }
+        if (++ctrlCount >= ctrl)
+        {
+            ctrlCount = 0;
+            auto& b = banks[cur];
+            carPeak = std::max (b.meanCarrier(), carPeak * 0.995f);
+            const float whiten = 1.f - 0.45f * prm.character;
+            const float dyn = std::clamp (carrierLevel, 0.f, 1.f);
+            b.control (prm.formant / std::max (0.1f, b.spacing), whiten, dyn, floor, ctrl);
+            if (xf < 1.f) banks[prev].control (prm.formant / std::max (0.1f, banks[prev].spacing), whiten, dyn, floor, ctrl);
+            carrierOn = dyn * b.meanCarrier() / (b.meanCarrier() + floor);
+        }
 
-        // ---- consonnes : passage direct des aigus de la voix, seulement quand c'est une consonne
         const float hiss = hpB.hp (hpA.hp (voice)) * prm.sibilance * uv * 0.9f;
-        yL += hiss; yR += hiss;
+        yL = (yL + hiss) * gate; yR = (yR + hiss) * gate;
 
-        // ---- niveau automatique : la sortie suit le niveau de la voix
-        yL *= gate; yR *= gate;
-        if (gate > 0.5f && carrierOn > 0.6f)
+        // niveau automatique : le robot sort au niveau de la voix
+        if (gate > 0.9f && carrierOn > 0.6f)
         {
             rmsIn.process (voice * voice);
             rmsOut.process (0.5f * (yL * yL + yR * yR));
@@ -545,151 +774,45 @@ public:
                 autoGainTarget = std::clamp (std::sqrt ((rmsIn.y + 1e-10f) / (rmsOut.y + 1e-10f)), 0.1f, 12.f);
             }
         }
-        autoGain += (autoGainTarget - autoGain) * 0.00015f;
+        autoGain += (autoGainTarget - autoGain) * 0.0001f;
         outL = yL * autoGain; outR = yR * autoGain;
-        levelOut = std::max (std::abs (outL), levelOut * 0.9995f);
     }
 
-    int numBands() const { return n; }
-    float bandFreq (int i) const { return fc[(size_t) i]; }
-    float modLevel (int i) const { return band[(size_t) i].modEnv; }
-    float carLevel (int i) const { return band[(size_t) i].carEnv; }
-    float outGain (int i) const { return band[(size_t) i].g * band[(size_t) i].carEnv; }
-    float unvoiced = 0.f, levelOut = 0.f;
+    int numBands() const { return banks[cur].n; }
+    float bandFreq (int i) const { return banks[cur].fc[i]; }
+    float modLevel (int i) const { return banks[cur].modEnv[i]; }
+    float carLevel (int i) const { return banks[cur].ce[i]; }
+    float outGain (int i) const { return banks[cur].g[i]; }
+    float unvoiced = 0.f;
+    bool gateIsOpen() const { return gateOpen; }
 
 private:
-    struct Band
-    {
-        std::array<Svf, 4> m;
-        std::array<Svf, 3> cl, cr;
-        float gA = 1.f, gS = 1.f;
-        EnvFollower mEnv, cEnv;
-        float modEnv = 0, carEnv = 0, g = 0, gStep = 0;
-    };
-
-    void build()
-    {
-        n = std::clamp (prm.bands, 4, maxBands);
-        builtBands = n;
-        const float lo = 80.f, hi = std::min (12000.f, 0.42f * fs);
-        const float r = std::pow (hi / lo, 1.f / (float) (n - 1));
-        // Passe-bandes de Butterworth (sommet plat, flancs raides) : largeur a -3 dB un peu
-        // plus grande que l'ecart entre bandes (doux) -> un peu plus petite (precis)
-        const float eff = std::log2 (r) * (1.3f - 0.5f * prm.sharp);
-        spacing = std::log2 (r) * 12.f;
-        for (int i = 0; i < n; ++i)
-        {
-            fc[(size_t) i] = lo * std::pow (r, (float) i);
-            auto& b = band[(size_t) i];
-            b = Band();
-            b.gA = butterworthBandpass (fc[(size_t) i], eff, 4, b.m.data());
-            b.gS = butterworthBandpass (fc[(size_t) i], eff, 3, b.cl.data());
-            b.cr = b.cl;
-        }
-        setEnvelopes();
-    }
-    // Conception exacte d'un passe-bande de Butterworth d'ordre 2*M (transformation passe-bas ->
-    // passe-bande dans le domaine pre-deforme de la transformee bilineaire), decompose en M
-    // cellules SVF. Renvoie le gain qui ramene la cascade a 1 au centre.
-    float butterworthBandpass (float centre, float bwOct, int M, Svf* out) const
-    {
-        using C = std::complex<double>;
-        const double nyq = 0.49 * fs;
-        const double fl = centre * std::exp2 (-0.5 * bwOct), fh = std::min (nyq, centre * std::exp2 (0.5 * bwOct));
-        const double wl = std::tan (pi * fl / fs), wh = std::tan (pi * fh / fs);
-        const double w0 = std::sqrt (wl * wh), B = wh - wl;
-        int s = 0;
-        C total (1.0, 0.0);
-        auto addSection = [&] (C pole)
-        {
-            if (pole.imag() < 0) pole = std::conj (pole);
-            const double wi = std::abs (pole), qi = wi / std::max (1e-9, -2.0 * pole.real());
-            const float fi = (float) (std::atan (wi) * fs / pi);
-            out[s].set (std::min (fi, 0.47f * fs), (float) qi, fs);
-            const C jw (0.0, w0);
-            total *= (jw * wi / qi) / (jw * jw + jw * wi / qi + wi * wi);
-            ++s;
-        };
-        constexpr double dpi = 3.141592653589793;
-        for (int k = 0; k < M; ++k)
-        {
-            const C p = std::polar (1.0, dpi * (2.0 * k + M + 1.0) / (2.0 * M));  // pole du passe-bas
-            const bool real = std::abs (p.imag()) < 1e-6;
-            if (! real && p.imag() < 0.0) continue;                                 // son conjugue suffit
-            const C pb = C (real ? -1.0 : p.real(), real ? 0.0 : p.imag()) * B;
-            const C d = std::sqrt (pb * pb - 4.0 * w0 * w0);
-            if (real) addSection ((pb + d) * 0.5);                                  // pole reel : une cellule
-            else { addSection ((pb + d) * 0.5); addSection ((pb - d) * 0.5); }
-        }
-        jassert (s == M);
-        return (float) (1.0 / std::max (1e-12, std::abs (total)));
-    }
-
-    void setEnvelopes()
-    {
-        for (int i = 0; i < n; ++i)
-        {
-            const float f = fc[(size_t) i];
-            // une periode minimale par bande : moins d'ondulation dans les graves
-            const float a = std::max (prm.attackMs, 600.f / f);
-            const float r = std::max (prm.releaseMs, 2200.f / f);
-            band[(size_t) i].mEnv.set (a, r, fs);
-            band[(size_t) i].cEnv.set (std::max (1.f, 500.f / f), std::max (12.f, 2500.f / f), fs);
-        }
-    }
-
-    void updateGains (float carrierLevel)
-    {
-        // porteuse : niveau moyen des bandes, pour un blanchiment independant du volume
-        float mean = 0.f;
-        for (int i = 0; i < n; ++i) mean += band[(size_t) i].carEnv;
-        mean /= (float) n;
-        carPeak = std::max (mean, carPeak * 0.995f);
-        const float floor = 1.0e-5f + 0.002f * carPeak;
-        const float shift = prm.formant / std::max (0.1f, spacing);   // en bandes
-        const float w = 0.95f;                                          // blanchiment (garde 5 % de la pente de la porteuse)
-        const float presence = mean / (mean + floor);
-        const float dyn = std::clamp (carrierLevel, 0.f, 1.f);
-        carrierOn = presence * dyn;
-        for (int i = 0; i < n; ++i)
-        {
-            const float src = (float) i - shift;
-            float me = 0.f;
-            if (src >= 0.f && src <= (float) (n - 1))
-            {
-                const int i0 = (int) src; const float t = src - (float) i0;
-                const int i1 = std::min (n - 1, i0 + 1);
-                me = band[(size_t) i0].modEnv * (1.f - t) + band[(size_t) i1].modEnv * t;
-            }
-            else if (src > -1.f && src < 0.f) me = band[0].modEnv * (1.f + src);
-            else if (src > (float) (n - 1) && src < (float) n) me = band[(size_t) n - 1].modEnv * ((float) n - src);
-            me *= tilt[(size_t) i];
-            const float ce = std::max (band[(size_t) i].carEnv, floor);
-            float gain = me * std::pow (ce / (mean + 1e-9f), 1.f - w) / ce;
-            // la sortie de la bande vaut ~ porteuse * gain ~ enveloppe de la voix : le plancher
-            // de blanchiment suffit a la borner. Cette limite ne sert que de filet de securite.
-            gain = std::min (gain * presence * dyn, 20000.f);
-            auto& b = band[(size_t) i];
-            b.gStep = (gain - b.g) / (float) ctrl;
-        }
-    }
-
     VocoderParams prm;
-    std::array<Band, maxBands> band;
-    std::array<float, maxBands> fc {}, tilt {};
+    Bank banks[2];
+    int cur = 0, prev = 1, ctrlCount = 0, agCount = 0, holdLeft = 0;
+    float xf = 1.f;
+    bool built = false, gateOpen = false;
     Svf hpA, hpB, detHp;
     EnvFollower hfEnv, totEnv, gateEnv;
     OnePole uvSmooth, gateSmooth, rmsIn, rmsOut;
     Rng noise { 4242 };
-    float fs = 48000.f, spacing = 1.f, carRms = 0.f, carPeak = 1e-3f, tiltBuilt = -999.f;
-    float autoGain = 1.f, autoGainTarget = 1.f, carrierOn = 0.f;
-    int n = 24, builtBands = -1, ctrlCount = 0, agCount = 0;
+    float fs = 48000.f, carRms = 0.f, carPeak = 1e-4f, autoGain = 1.f, autoGainTarget = 1.f, carrierOn = 0.f;
 };
 
 //==============================================================================
-// Doubleur facon Waves Doubler : 2 ou 4 voix, chacune desaccordee, retardee,
-// placee dans l'espace, avec une derive lente (comme un vrai chanteur qui double)
-struct DoublerParams { int voices = 0; float detuneCents = 12.f, delayMs = 18.f, width = 0.8f, drift = 0.5f, mix = 0.5f; };
+// Doubleur facon Waves Doubler. Chaque voix lit la ligne a retard a une vitesse
+// legerement differente (desaccord). Quand la tete de lecture sort de sa fenetre,
+// elle saute d'une distance choisie par correlation (synchrone avec la periode de la
+// voix) et se fond en 8 ms : une seule tete active la plupart du temps, donc pas de
+// filtrage en peigne ni de "flanger", desaccord net au cent pres.
+struct DoublerVoiceParams { float delayMs = 12.f, cents = 8.f, pan = -1.f, gainDb = 0.f; };
+struct DoublerParams
+{
+    int voices = 0;                  // 0 OFF, 1 = 2 voix, 2 = 4 voix
+    float mix = 0.5f, direct = 1.f, width = 1.f, detuneScale = 1.f, delayScale = 1.f;
+    float drift = 0.5f, rate = 0.8f, hpf = 120.f, lpf = 16000.f;
+    std::array<DoublerVoiceParams, 4> v;
+};
 
 class Doubler
 {
@@ -697,80 +820,159 @@ public:
     void prepare (double sampleRate)
     {
         fs = (float) sampleRate;
-        line.prepare ((int) (0.25f * fs));
-        hp.set (140.f, 0.707f, fs);
-        win = 0.042f * fs;
+        line.prepare ((int) (0.4f * fs));
         for (int i = 0; i < 4; ++i)
         {
             auto& v = vs[(size_t) i];
-            v.phase = 0.25f * (float) i; v.rng = Rng ((uint32_t) (101 + i * 13));
-            v.dSm.setMs (900.f, fs); v.pSm.setMs (700.f, fs);
-            v.gainSm.setMs (30.f, fs);
+            v = V();
+            v.rng = Rng ((uint32_t) (101 + i * 13));
+            v.gain.init (0.f, 40.f, fs); v.pan.init (0.f, 60.f, fs);
         }
+        mixS.init (0.f, 30.f, fs); dirS.init (1.f, 30.f, fs); widthS.init (1.f, 60.f, fs);
+        fadeLen = (int) (0.008f * fs);
+        corrLen = (int) (0.006f * fs);
     }
     void setParams (const DoublerParams& p) { prm = p; }
-    void reset() { line.reset(); }
+    void reset() { line.reset(); for (auto& v : vs) v.d = -1.f; }
 
     inline void process (float& L, float& R)
     {
-        const float in = hp.hp (0.5f * (L + R));
+        // filtres des voix doublees (passe-haut / passe-bas 12 dB/oct)
+        if (prm.hpf != hpfSet) { hpfSet = prm.hpf; hp.set (prm.hpf, 0.707f, fs); }
+        if (prm.lpf != lpfSet) { lpfSet = prm.lpf; lp.set (std::min (prm.lpf, 0.45f * fs), 0.707f, fs); }
+        const float in = lp.lp (hp.hp (0.5f * (L + R)));
         line.push (in);
         const int nv = prm.voices <= 0 ? 0 : (prm.voices == 1 ? 2 : 4);
-        static constexpr float detMul[4] = { 1.f, -1.f, 0.55f, -0.62f };
-        static constexpr float dlyMul[4] = { 1.f, 0.7f, 1.4f, 0.45f };
-        static constexpr float panPos[4] = { -1.f, 1.f, -0.42f, 0.42f };
-        const float norm = nv == 0 ? 0.f : 1.f / std::sqrt ((float) nv) * 1.15f;
+        mixS.t = prm.mix; dirS.t = prm.direct; widthS.t = prm.width;
+        const float mix = mixS.next(), dir = dirS.next(), width = widthS.next();
+        const float norm = nv == 0 ? 0.f : 1.f / std::sqrt ((float) nv) * 1.25f;
         float oL = 0.f, oR = 0.f;
+        const float rate = std::max (0.05f, prm.rate);
         for (int i = 0; i < 4; ++i)
         {
             auto& v = vs[(size_t) i];
-            const float g = v.gainSm.process (i < nv ? 1.f : 0.f);
-            if (g < 1e-4f) continue;
-            if (++v.cnt >= v.next)   // nouvelle cible de derive
+            const auto& vp = prm.v[(size_t) i];
+            v.gain.t = i < nv ? dbToGain (vp.gainDb) : 0.f;
+            const float g = v.gain.next();
+            if (g < 1e-5f && v.gain.t == 0.f) { v.d = -1.f; continue; }
+            // derive aleatoire lissee (hauteur + retard)
+            if (++v.cnt >= v.next)
             {
-                v.cnt = 0; v.next = (int) (fs * (0.4f + 0.9f * v.rng.uni()));
+                v.cnt = 0; v.next = (int) (fs / rate * (0.6f + 0.8f * v.rng.uni()));
                 v.dT = v.rng.next(); v.pT = v.rng.next();
             }
-            const float dDrift = v.dSm.process (v.dT) * prm.drift * 3.5f;      // ms
-            const float pDrift = v.pSm.process (v.pT) * prm.drift * 5.f;       // cents
-            const float cents = prm.detuneCents * detMul[i] + pDrift;
-            const float ratio = std::exp2 (cents / 1200.f);
-            v.phase += (1.f - ratio) / win;
-            v.phase -= std::floor (v.phase);
-            const float base = std::max (1.f, (std::max (0.5f, prm.delayMs * dlyMul[i] + dDrift) * 0.001f * fs) - 0.5f * win);
-            const float p2 = v.phase + 0.5f - std::floor (v.phase + 0.5f);
-            const float w1 = std::sin (pi * v.phase), w2 = std::sin (pi * p2);
-            const float s = line.read (base + v.phase * win) * w1 * w1 + line.read (base + p2 * win) * w2 * w2;
-            const float pan = panPos[i] * prm.width;
-            const float a = (pan + 1.f) * 0.25f * pi;
+            const float sm = std::exp (-rate / (0.7f * fs));
+            v.dDr = v.dT + sm * (v.dDr - v.dT);
+            v.pDr = v.pT + sm * (v.pDr - v.pT);
+            const float centre = std::max (0.004f * fs, (vp.delayMs * prm.delayScale + v.dDr * prm.drift * 3.f) * 0.001f * fs);
+            if (v.d < 0.f) { v.d = centre; v.c = centre; v.fading = false; }
+            const float dc = centre - v.c;
+            v.c = centre;
+            const float cents = vp.cents * prm.detuneScale + v.pDr * prm.drift * 6.f;
+            const float step = 1.f - std::exp2 (cents / 1200.f) + dc;
+            v.d += step;
+            if (v.fading) v.dOld += step;
+            const float W = std::clamp (0.4f * centre, 0.003f * fs, 0.012f * fs);
+            if (! v.fading)
+            {
+                if (v.d < centre - W) splice (v, +1, W);
+                else if (v.d > centre + W) splice (v, -1, W);
+            }
+            float s = line.read (v.d);
+            if (v.fading)
+            {
+                const float w = 0.5f - 0.5f * std::cos (pi * (float) v.fadePos / (float) fadeLen);
+                s = line.read (v.dOld) * (1.f - w) + s * w;
+                if (++v.fadePos >= fadeLen) v.fading = false;
+            }
+            v.pan.t = std::clamp (vp.pan * std::min (1.f, width), -1.f, 1.f);
+            const float a = (v.pan.next() + 1.f) * 0.25f * pi;
             oL += s * std::cos (a) * g * norm;
             oR += s * std::sin (a) * g * norm;
         }
-        L += oL * prm.mix * 1.4142f;
-        R += oR * prm.mix * 1.4142f;
+        // largeur > 100 % : on elargit encore l'image des doublures (M/S)
+        if (width > 1.f)
+        {
+            const float m = 0.5f * (oL + oR), sd = 0.5f * (oL - oR) * width;
+            oL = m + sd; oR = m - sd;
+        }
+        L = L * dir + oL * mix * 1.4142f;
+        R = R * dir + oR * mix * 1.4142f;
     }
 
 private:
-    struct V { float phase = 0, dT = 0, pT = 0; int cnt = 0, next = 1; Rng rng; OnePole dSm, pSm, gainSm; };
+    struct V
+    {
+        float d = -1.f, dOld = 0.f, c = 0.f, dT = 0.f, pT = 0.f, dDr = 0.f, pDr = 0.f;
+        int cnt = 0, next = 1, fadePos = 0;
+        bool fading = false;
+        Rng rng;
+        Smooth gain, pan;
+    };
+    void splice (V& v, int dir, float W)
+    {
+        // cherche le saut J qui prolonge le mieux la forme d'onde actuelle
+        const int jMin = (int) (1.4f * W), jMax = (int) (2.4f * W);
+        const int base = (int) v.d;
+        const int maxD = line.size() - corrLen - 8;
+        float bestC = -2.f; int bestJ = (jMin + jMax) / 2;
+        float ea = 0.f;
+        for (int k = 0; k < corrLen; k += 2) { const float a = line.readInt (base + k); ea += a * a; }
+        for (int J = jMin; J <= jMax; J += 2)
+        {
+            const int nd = base + dir * J;
+            if (nd < 2 || nd > maxD) continue;
+            float ab = 0.f, eb = 0.f;
+            for (int k = 0; k < corrLen; k += 2)
+            {
+                const float a = line.readInt (base + k), b = line.readInt (nd + k);
+                ab += a * b; eb += b * b;
+            }
+            const float c = ab / std::sqrt (ea * eb + 1e-12f);
+            if (c > bestC) { bestC = c; bestJ = J; }
+        }
+        v.dOld = v.d;
+        v.d = std::clamp (v.d + (float) (dir * bestJ), 2.f, (float) maxD);
+        v.fading = true; v.fadePos = 0;
+    }
+
     DelayLine line;
-    Svf hp;
+    Svf hp, lp;
     std::array<V, 4> vs;
     DoublerParams prm;
-    float fs = 48000.f, win = 2000.f;
+    Smooth mixS, dirS, widthS;
+    float fs = 48000.f, hpfSet = -1.f, lpfSet = -1.f;
+    int fadeLen = 384, corrLen = 288;
 };
 
 //==============================================================================
-// Ensemble (chorus a 3 phases, facon string machine) : le son "vocoder 80s"
+// Saturation tanh a anti-repliement (ADAA du 1er ordre)
+struct AdaaTanh
+{
+    float x1 = 0.f, F1 = 0.f;
+    static inline float logcosh (float x) { const float a = std::abs (x); return a + std::log1p (std::exp (-2.f * a)) - 0.69314718f; }
+    inline float process (float x)
+    {
+        const float F = logcosh (x);
+        const float d = x - x1;
+        const float y = std::abs (d) < 1e-4f ? std::tanh (0.5f * (x + x1)) : (F - F1) / d;
+        x1 = x; F1 = F;
+        return y;
+    }
+};
+
 class Ensemble
 {
 public:
-    void prepare (double sampleRate) { fs = (float) sampleRate; l.prepare ((int) (0.05f * fs)); r.prepare ((int) (0.05f * fs)); }
+    void prepare (double sampleRate) { fs = (float) sampleRate; l.prepare ((int) (0.05f * fs)); r.prepare ((int) (0.05f * fs)); amt.init (0.f, 40.f, fs); }
     void reset() { l.reset(); r.reset(); }
-    inline void process (float& L, float& R, float amt)
+    inline void process (float& L, float& R, float amount, float rate)
     {
         l.push (L); r.push (R);
-        if (amt <= 0.0001f) return;
-        slow += 0.55f / fs; if (slow > 1.f) slow -= 1.f;
+        amt.t = amount;
+        const float a = amt.next();
+        if (a <= 0.0001f) return;
+        slow += 0.55f * rate / fs; if (slow > 1.f) slow -= 1.f;
         fast += 6.1f / fs;  if (fast > 1.f) fast -= 1.f;
         float wl = 0.f, wr = 0.f;
         for (int k = 0; k < 3; ++k)
@@ -782,16 +984,61 @@ public:
             wr += r.read ((6.5f + mr) * 0.001f * fs);
         }
         wl *= 0.4f; wr *= 0.4f;
-        L = L * (1.f - 0.45f * amt) + wl * amt;
-        R = R * (1.f - 0.45f * amt) + wr * amt;
+        L = L * (1.f - 0.45f * a) + wl * a;
+        R = R * (1.f - 0.45f * a) + wr * a;
     }
 private:
     DelayLine l, r;
+    Smooth amt;
     float fs = 48000.f, slow = 0.f, fast = 0.f;
 };
 
-//==============================================================================
-// Delai ping-pong synchronise au tempo
+// Phaser 6 etages, stereo (LFO decales)
+class Phaser
+{
+public:
+    void prepare (double sampleRate) { fs = (float) sampleRate; mixS.init (0.f, 40.f, fs); reset(); }
+    void reset() { for (auto& s : st) s.fill (0.f); fbL = fbR = 0.f; }
+    inline void process (float& L, float& R, float mix, float rate, float depth)
+    {
+        mixS.t = mix;
+        const float m = mixS.next();
+        if (m <= 0.0001f) return;
+        if (++cnt >= 16)
+        {
+            cnt = 0;
+            ph += 16.f * rate / fs; if (ph > 1.f) ph -= 1.f;
+            for (int c = 0; c < 2; ++c)
+            {
+                const float l = 0.5f + 0.5f * std::sin (2.f * pi * (ph + 0.25f * (float) c));
+                const float f = 200.f * std::pow (20.f * std::max (0.05f, depth) + 1.f, l);
+                const float t = std::tan (pi * std::min (f, 0.45f * fs) / fs);
+                coef[c] = (t - 1.f) / (t + 1.f);
+            }
+        }
+        auto run = [&] (float x, int c, float& fb)
+        {
+            float y = x + 0.45f * fb;
+            for (int k = 0; k < 6; ++k)
+            {
+                const float o = coef[c] * y + st[(size_t) c][(size_t) k];
+                st[(size_t) c][(size_t) k] = y - coef[c] * o;
+                y = o;
+            }
+            fb = y;
+            return y;
+        };
+        const float yl = run (L, 0, fbL), yr = run (R, 1, fbR);
+        L = L * (1.f - 0.5f * m) + yl * 0.5f * m;
+        R = R * (1.f - 0.5f * m) + yr * 0.5f * m;
+    }
+private:
+    std::array<std::array<float, 6>, 2> st {};
+    float coef[2] {}, fbL = 0.f, fbR = 0.f, fs = 48000.f, ph = 0.f;
+    Smooth mixS;
+    int cnt = 0;
+};
+
 class TempoDelay
 {
 public:
@@ -799,67 +1046,75 @@ public:
     {
         fs = (float) sampleRate;
         l.prepare ((int) (2.6f * fs)); r.prepare ((int) (2.6f * fs));
-        for (auto* f : { &lpL, &lpR }) f->set (5200.f, 0.6f, fs);
-        for (auto* f : { &hpL, &hpR }) f->set (180.f, 0.6f, fs);
-        tSm.setMs (120.f, fs);
-        tSm.y = 0.25f * fs;
+        for (auto* f : { &hpL, &hpR }) f->set (150.f, 0.6f, fs);
+        tSm.setMs (150.f, fs); tSm.y = 0.25f * fs;
+        mixS.init (0.f, 40.f, fs);
     }
     void reset() { l.reset(); r.reset(); }
-    inline void process (float& L, float& R, float timeSec, float fb, float mix)
+    inline void process (float& L, float& R, float timeSec, float fb, float mix, float toneHz, bool pingPong)
     {
+        mixS.t = mix;
+        const float m = mixS.next();
+        if (toneHz != toneSet) { toneSet = toneHz; lpL.set (toneHz, 0.6f, fs); lpR.set (toneHz, 0.6f, fs); }
         const float d = tSm.process (std::clamp (timeSec, 0.01f, 2.5f) * fs);
         const float dl = l.read (d), dr = r.read (d);
-        const float in = 0.5f * (L + R);
-        l.push (hpL.hp (lpL.lp (in + dr * fb)));
-        r.push (hpR.hp (lpR.lp (dl * fb)));
-        L += dl * mix; R += dr * mix;
+        if (pingPong)
+        {
+            const float in = 0.5f * (L + R);
+            l.push (hpL.hp (lpL.lp (in + dr * fb)));
+            r.push (hpR.hp (lpR.lp (dl * fb)));
+        }
+        else
+        {
+            l.push (hpL.hp (lpL.lp (L + dl * fb)));
+            r.push (hpR.hp (lpR.lp (R + dr * fb)));
+        }
+        L += dl * m; R += dr * m;
     }
 private:
     DelayLine l, r;
     Svf lpL, lpR, hpL, hpR;
     OnePole tSm;
-    float fs = 48000.f;
+    Smooth mixS;
+    float fs = 48000.f, toneSet = -1.f;
 };
 
-//==============================================================================
-// Reverbe FDN 8 lignes (matrice de Hadamard), diffusion d'entree, amortissement
+// Reverbe FDN 8 lignes : pre-delai, taille, amortissement, largeur
 class Reverb
 {
 public:
     void prepare (double sampleRate)
     {
         fs = (float) sampleRate;
-        for (int i = 0; i < 8; ++i) lines[(size_t) i].prepare ((int) (0.2f * fs));
-        for (int i = 0; i < 4; ++i) ap[(size_t) i].prepare ((int) (0.03f * fs));
-        pre.prepare ((int) (0.05f * fs));
-        setSize (0.5f, true);
+        for (auto& d : lines) d.prepare ((int) (0.25f * fs));
+        for (auto& d : ap) d.prepare ((int) (0.03f * fs));
+        pre.prepare ((int) (0.25f * fs));
+        mixS.init (0.f, 40.f, fs);
+        set (0.5f, 0.5f, true);
     }
-    void reset()
+    void reset() { for (auto& d : lines) d.reset(); for (auto& d : ap) d.reset(); pre.reset(); damp.fill (0.f); }
+    void set (float s, float dampAmt, bool force = false)
     {
-        for (auto& d : lines) d.reset();
-        for (auto& d : ap) d.reset();
-        pre.reset(); damp.fill (0.f);
-    }
-    void setSize (float s, bool force = false)
-    {
-        if (! force && std::abs (s - size) < 1e-4f) return;
-        size = s;
+        if (! force && std::abs (s - size) < 1e-4f && std::abs (dampAmt - dampSet) < 1e-4f) return;
+        size = s; dampSet = dampAmt;
         static constexpr float base[8] = { 29.7f, 37.1f, 41.1f, 43.7f, 53.1f, 61.3f, 67.1f, 79.3f };
         const float scale = 0.55f + 1.1f * s;
-        const float t60 = 0.7f + 4.3f * s * s;
+        const float t60 = 0.6f + 5.f * s * s;
         for (int i = 0; i < 8; ++i)
         {
             len[(size_t) i] = base[i] * scale * 0.001f * fs;
             fbk[(size_t) i] = std::pow (10.f, -3.f * len[(size_t) i] / (t60 * fs));
         }
-        dampA = std::exp (-2.f * pi * (4200.f + 3000.f * (1.f - s)) / fs);
+        dampA = std::exp (-2.f * pi * (1500.f + 9000.f * (1.f - dampAmt)) / fs);
     }
-    inline void process (float& L, float& R, float mix)
+    inline void process (float& L, float& R, float mix, float preMs, float width)
     {
-        if (mix <= 0.0001f) { tail = 0; return; }
+        mixS.t = mix;
+        const float m = mixS.next();
+        if (m <= 0.0001f) return;
         static constexpr float apd[4] = { 4.7f, 3.6f, 12.7f, 9.3f };
         pre.push (0.5f * (L + R));
-        float x = pre.read (0.012f * fs);
+        float x = pre.read (std::max (1.f, preMs * 0.001f * fs));
         for (int i = 0; i < 4; ++i)
         {
             auto& d = ap[(size_t) i];
@@ -872,58 +1127,115 @@ public:
         lfo += 0.31f / fs; if (lfo > 1.f) lfo -= 1.f;
         for (int i = 0; i < 8; ++i)
         {
-            const float m = (i & 1) ? std::sin (2.f * pi * (lfo + 0.13f * (float) i)) * 0.0008f * fs : 0.f;
-            float v = lines[(size_t) i].read (len[(size_t) i] + m);
+            const float md = (i & 1) ? std::sin (2.f * pi * (lfo + 0.13f * (float) i)) * 0.0008f * fs : 0.f;
+            const float v = lines[(size_t) i].read (len[(size_t) i] + md);
             damp[(size_t) i] = v + dampA * (damp[(size_t) i] - v);
             s[(size_t) i] = damp[(size_t) i] * fbk[(size_t) i];
         }
-        // Hadamard 8 (transformee rapide)
         for (int h = 1; h < 8; h <<= 1)
             for (int i = 0; i < 8; i += h << 1)
                 for (int j = i; j < i + h; ++j) { const float a = s[(size_t) j], b = s[(size_t) j + h]; s[(size_t) j] = a + b; s[(size_t) j + h] = a - b; }
-        const float nrm = 0.35355339f;
-        for (int i = 0; i < 8; ++i) lines[(size_t) i].push (s[(size_t) i] * nrm + x * ((i & 2) ? -0.5f : 0.5f));
-        const float wl = (damp[0] - damp[2] + damp[4] - damp[6]) * 0.6f;
-        const float wr = (damp[1] - damp[3] + damp[5] - damp[7]) * 0.6f;
-        L = L * (1.f - 0.35f * mix) + wl * mix;
-        R = R * (1.f - 0.35f * mix) + wr * mix;
+        for (int i = 0; i < 8; ++i) lines[(size_t) i].push (s[(size_t) i] * 0.35355339f + x * ((i & 2) ? -0.5f : 0.5f));
+        float wl = (damp[0] - damp[2] + damp[4] - damp[6]) * 0.6f;
+        float wr = (damp[1] - damp[3] + damp[5] - damp[7]) * 0.6f;
+        const float mid = 0.5f * (wl + wr), side = 0.5f * (wl - wr) * width;
+        wl = mid + side; wr = mid - side;
+        L = L * (1.f - 0.35f * m) + wl * m;
+        R = R * (1.f - 0.35f * m) + wr * m;
     }
 private:
     std::array<DelayLine, 8> lines;
     std::array<DelayLine, 4> ap;
     DelayLine pre;
     std::array<float, 8> len {}, fbk {}, damp {};
-    float fs = 48000.f, size = -1.f, dampA = 0.f, lfo = 0.f;
-    int tail = 0;
+    Smooth mixS;
+    float fs = 48000.f, size = -1.f, dampSet = -1.f, dampA = 0.f, lfo = 0.f;
+};
+
+// Compresseur "un bouton" (RMS, stereo lie, rattrapage automatique)
+class Compressor
+{
+public:
+    void prepare (double sampleRate) { fs = (float) sampleRate; det.setMs (8.f, fs); att = std::exp (-1.f / (0.005f * fs)); rel = std::exp (-1.f / (0.12f * fs)); grDb = 0.f; }
+    inline void process (float& L, float& R, float amount)
+    {
+        if (amount <= 0.001f) { grDb = 0.f; return; }
+        const float thr = -10.f - 24.f * amount, ratio = 1.5f + 4.f * amount;
+        const float lv = det.process (0.5f * (L * L + R * R));
+        const float db = 10.f * std::log10 (lv + 1e-12f);
+        const float over = db - thr;
+        const float target = over > 0.f ? -over * (1.f - 1.f / ratio) : 0.f;
+        grDb = target + (target < grDb ? att : rel) * (grDb - target);
+        const float makeup = -thr * (1.f - 1.f / ratio) * 0.45f;
+        const float g = dbToGain (grDb + makeup);
+        L *= g; R *= g;
+    }
+    float grDb = 0.f;
+private:
+    OnePole det;
+    float fs = 48000.f, att = 0.f, rel = 0.f;
+};
+
+// Limiteur de sortie : anticipation optionnelle (mode HQ), gain lisse, plafond -0.3 dBFS
+class Limiter
+{
+public:
+    void prepare (double sampleRate, int lookahead)
+    {
+        fs = (float) sampleRate; la = lookahead;
+        l.prepare (std::max (8, la + 4)); r.prepare (std::max (8, la + 4));
+        peakHold.assign ((size_t) std::max (1, la + 1), 0.f);
+        hp = 0; g = 1.f;
+        rel = std::exp (-1.f / (0.08f * fs));
+        att = std::exp (-1.f / std::max ((float) la * 0.5f, 0.0002f * fs));
+    }
+    inline void process (float& L, float& R)
+    {
+        const float pk = std::max (std::abs (L), std::abs (R));
+        float need = pk > ceil ? ceil / pk : 1.f;
+        if (la > 0)
+        {
+            // minimum glissant du gain requis sur la fenetre d'anticipation
+            peakHold[(size_t) hp] = need; hp = (hp + 1) % (int) peakHold.size();
+            for (auto v : peakHold) need = std::min (need, v);
+            l.push (L); r.push (R);
+            L = l.readInt (la); R = r.readInt (la);
+        }
+        g = need < g ? need + att * (g - need) : need + rel * (g - need);
+        L *= g; R *= g;
+        // filet de securite (ne sert qu'en cas extreme)
+        L = std::clamp (L, -1.f, 1.f); R = std::clamp (R, -1.f, 1.f);
+        grDb = gainToDb (g);
+    }
+    float grDb = 0.f;
+private:
+    DelayLine l, r;
+    std::vector<float> peakHold;
+    int la = 0, hp = 0;
+    float fs = 48000.f, g = 1.f, att = 0.f, rel = 0.f, ceil = 0.966f;
 };
 
 //==============================================================================
-// Quantification de hauteur (mode AUTO)
 namespace scales
 {
-    // masques de 12 bits (bit 0 = tonique)
     inline int mask (int scale)
     {
         switch (scale)
         {
-            case 1: return 0xFFF;                                   // CHROMATIQUE
-            case 2: return 0b101010110101;                          // MAJEUR
-            case 3: return 0b010110101101;                          // MINEUR
-            case 4: return 0b100110101101;                          // MINEUR HARMONIQUE
-            case 5: return 0b001010010101;                          // PENTA MAJEURE
-            case 6: return 0b010010101001;                          // PENTA MINEURE
-            case 7: return 0b011010101101;                          // DORIEN
+            case 1: return 0xFFF;
+            case 2: return 0b101010110101;
+            case 3: return 0b010110101101;
+            case 4: return 0b100110101101;
+            case 5: return 0b001010010101;
+            case 6: return 0b010010101001;
+            case 7: return 0b011010101101;
             default: return 0xFFF;
         }
     }
     inline float quantize (float midi, int key, int scale)
     {
-        if (scale == 0) return midi;                                // LIBRE : la voix telle quelle
-        if (scale == 8)                                             // DRONE : toujours la tonique
-        {
-            const float rel = midi - (float) key;
-            return (float) key + 12.f * std::round (rel / 12.f);
-        }
+        if (scale == 0) return midi;
+        if (scale == 8) { const float rel = midi - (float) key; return (float) key + 12.f * std::round (rel / 12.f); }
         const int m = mask (scale);
         const int base = (int) std::round (midi);
         int best = base; float bd = 99.f;
@@ -938,7 +1250,6 @@ namespace scales
         }
         return (float) best;
     }
-    // n-ieme degre au-dessus dans la gamme (pour les harmonies)
     inline float degreeUp (float note, int steps, int key, int scale)
     {
         if (scale == 0 || scale == 1 || scale == 8)

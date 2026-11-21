@@ -78,7 +78,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" artefacts/vck-windows/*.exe artefacts/vck-macos/*.pkg artefacts/vck-macos/*.zip \
-            --repo "${GITHUB_REPOSITORY}" --clobber \
-          || gh release create "${GITHUB_REF_NAME}" artefacts/vck-windows/*.exe artefacts/vck-macos/*.pkg artefacts/vck-macos/*.zip \
-            --repo "${GITHUB_REPOSITORY}" --title "vck ${GITHUB_REF_NAME}" --notes "Installeurs Windows (.exe) et macOS (.pkg, Apple Silicon + Intel)."
+          mapfile -t FILES < <(find artefacts -type f \( -name '*.exe' -o -name '*.pkg' -o -name '*.zip' \))
+          printf '%s\n' "${FILES[@]}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${FILES[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${FILES[@]}" --repo "${GITHUB_REPOSITORY}" \
+              --title "vck ${GITHUB_REF_NAME}" --notes "Installeurs Windows (.exe) et macOS (.pkg, Apple Silicon + Intel)."
+          fi

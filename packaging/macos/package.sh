@@ -8,6 +8,7 @@ OUT="$2"
 VER="1.0.0"
 STAGE="$(mktemp -d)"
 mkdir -p "$OUT" "$STAGE/vst3" "$STAGE/au" "$STAGE/app"
+OUT="$(cd "$OUT" && pwd)"   # chemin absolu : le zip est cree apres un cd
 
 cp -R "$ART/VST3/vck.vst3"        "$STAGE/vst3/"
 cp -R "$ART/AU/vck.component"     "$STAGE/au/"
